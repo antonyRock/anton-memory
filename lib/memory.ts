@@ -131,46 +131,47 @@ export async function saveExtractedMemory(
   extraction: MemoryExtraction,
   sourceMessageId?: string | number
 ) {
-  const supabase = getSupabase();
   if (extraction.facts?.length) {
+    const facts = await filterNewFacts(extraction.facts);
     await insertWithFallbacks(
       "facts",
-      extraction.facts.map((fact) => ({
+      facts.map((fact) => ({
         content: fact.content,
         source_message_id: sourceMessageId
       })),
-      extraction.facts.map((fact) => ({
+      facts.map((fact) => ({
         content: fact.content
       })),
-      extraction.facts.map((fact) => ({
+      facts.map((fact) => ({
         fact: fact.content,
         source_message_id: sourceMessageId
       })),
-      extraction.facts.map((fact) => ({
+      facts.map((fact) => ({
         fact: fact.content
       }))
     );
   }
 
   if (extraction.entities?.length) {
+    const entities = await filterNewEntities(extraction.entities);
     await insertWithFallbacks(
       "entities",
-      extraction.entities.map((entity) => ({
+      entities.map((entity) => ({
         name: entity.name,
         type: entity.type ?? "unknown",
         description: entity.description ?? null,
         source_message_id: sourceMessageId
       })),
-      extraction.entities.map((entity) => ({
+      entities.map((entity) => ({
         name: entity.name,
         type: entity.type ?? "unknown",
         source_message_id: sourceMessageId
       })),
-      extraction.entities.map((entity) => ({
+      entities.map((entity) => ({
         name: entity.name,
         type: entity.type ?? "unknown"
       })),
-      extraction.entities.map((entity) => ({
+      entities.map((entity) => ({
         name: entity.name
       }))
     );
@@ -209,6 +210,7 @@ async function insertWithFallbacks(
   let lastError: string | undefined;
 
   for (const payload of payloads) {
+    if (payload.length === 0) return;
     const { error } = await supabase.from(table).insert(payload);
     if (!error) return;
     lastError = error.message;
@@ -217,4 +219,57 @@ async function insertWithFallbacks(
   if (lastError) {
     console.error(`Memory write failed for ${table}:`, lastError);
   }
+}
+
+async function filterNewFacts(facts: { content: string }[]) {
+  const supabase = getSupabase();
+  const { data } = await supabase
+    .from("facts")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(SEARCH_POOL_LIMIT);
+  const existing = new Set(
+    (data ?? []).map((record) =>
+      normalizeMemoryText(String(record.fact ?? record.content ?? ""))
+    )
+  );
+
+  return facts.filter((fact) => {
+    const normalized = normalizeMemoryText(fact.content);
+    if (!normalized || existing.has(normalized)) return false;
+    existing.add(normalized);
+    return true;
+  });
+}
+
+async function filterNewEntities(
+  entities: { name: string; type?: string; description?: string }[]
+) {
+  const supabase = getSupabase();
+  const { data } = await supabase
+    .from("entities")
+    .select("name, type")
+    .order("created_at", { ascending: false })
+    .limit(SEARCH_POOL_LIMIT);
+  const existing = new Set(
+    (data ?? []).map((record) =>
+      `${normalizeMemoryText(String(record.name ?? ""))}:${normalizeMemoryText(String(record.type ?? ""))}`
+    )
+  );
+
+  return entities.filter((entity) => {
+    const key = `${normalizeMemoryText(entity.name)}:${normalizeMemoryText(entity.type ?? "")}`;
+    if (!entity.name.trim() || existing.has(key)) return false;
+    existing.add(key);
+    return true;
+  });
+}
+
+function normalizeMemoryText(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[^a-zа-я0-9]+/gi, " ")
+    .trim()
+    .replace(/\s+/g, " ");
 }
