@@ -1,0 +1,168 @@
+import { getSupabase } from "@/lib/supabase";
+
+export type MemoryContext = {
+  facts: Record<string, unknown>[];
+  entities: Record<string, unknown>[];
+  tasks: Record<string, unknown>[];
+};
+
+export type MemoryExtraction = {
+  facts?: { content: string }[];
+  entities?: { name: string; type?: string; description?: string }[];
+  tasks?: { title: string; status?: string; description?: string }[];
+};
+
+const SEARCH_LIMIT = 8;
+const SEARCH_POOL_LIMIT = 50;
+
+function compactRecord(record: Record<string, unknown>) {
+  return Object.entries(record)
+    .filter(([, value]) => value !== null && value !== undefined && value !== "")
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join("; ");
+}
+
+async function safeSelect(table: "facts" | "entities" | "tasks") {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from(table)
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(SEARCH_POOL_LIMIT);
+
+  if (error) {
+    console.error(`Memory select failed for ${table}:`, error.message);
+    return [];
+  }
+
+  return data ?? [];
+}
+
+export async function retrieveMemory(query: string): Promise<MemoryContext> {
+  const [facts, entities, tasks] = await Promise.all([
+    safeSelect("facts"),
+    safeSelect("entities"),
+    safeSelect("tasks")
+  ]);
+
+  return {
+    facts: rankRecords(facts, query),
+    entities: rankRecords(entities, query),
+    tasks: rankRecords(tasks, query)
+  };
+}
+
+export function formatMemoryForPrompt(memory: MemoryContext) {
+  const sections = [
+    ["Facts", memory.facts],
+    ["Entities", memory.entities],
+    ["Tasks", memory.tasks]
+  ] as const;
+
+  const formatted = sections
+    .map(([title, records]) => {
+      if (records.length === 0) return `${title}: none`;
+      return `${title}:\n${records
+        .map((record, index) => `${index + 1}. ${compactRecord(record)}`)
+        .join("\n")}`;
+    })
+    .join("\n\n");
+
+  return formatted;
+}
+
+function rankRecords(records: Record<string, unknown>[], query: string) {
+  const terms = query
+    .toLowerCase()
+    .split(/[^a-zа-яё0-9]+/i)
+    .filter((term) => term.length >= 3);
+
+  return records
+    .map((record, index) => {
+      const text = compactRecord(record).toLowerCase();
+      const score = terms.reduce(
+        (sum, term) => sum + (text.includes(term) ? 1 : 0),
+        0
+      );
+      return { record, score, index };
+    })
+    .sort((a, b) => b.score - a.score || a.index - b.index)
+    .slice(0, SEARCH_LIMIT)
+    .map(({ record }) => record);
+}
+
+export async function saveMessage(role: "user" | "assistant", content: string) {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("messages")
+    .insert({ role, content })
+    .select("id")
+    .single();
+
+  if (error) {
+    throw new Error(`Could not save ${role} message: ${error.message}`);
+  }
+
+  return data?.id as string | number | undefined;
+}
+
+export async function saveExtractedMemory(
+  extraction: MemoryExtraction,
+  sourceMessageId?: string | number
+) {
+  const supabase = getSupabase();
+  const writes: Promise<unknown>[] = [];
+
+  if (extraction.facts?.length) {
+    writes.push(
+      Promise.resolve(
+        supabase.from("facts").insert(
+          extraction.facts.map((fact) => ({
+            content: fact.content,
+            source_message_id: sourceMessageId
+          }))
+        )
+      )
+    );
+  }
+
+  if (extraction.entities?.length) {
+    writes.push(
+      Promise.resolve(
+        supabase.from("entities").insert(
+          extraction.entities.map((entity) => ({
+            name: entity.name,
+            type: entity.type ?? "unknown",
+            description: entity.description ?? null,
+            source_message_id: sourceMessageId
+          }))
+        )
+      )
+    );
+  }
+
+  if (extraction.tasks?.length) {
+    writes.push(
+      Promise.resolve(
+        supabase.from("tasks").insert(
+          extraction.tasks.map((task) => ({
+            title: task.title,
+            status: task.status ?? "open",
+            description: task.description ?? null,
+            source_message_id: sourceMessageId
+          }))
+        )
+      )
+    );
+  }
+
+  const results = await Promise.allSettled(writes);
+  results.forEach((result) => {
+    if (result.status === "rejected") {
+      console.error("Memory write failed:", result.reason);
+    } else {
+      const value = result.value as { error?: { message?: string } };
+      if (value.error) console.error("Memory write failed:", value.error.message);
+    }
+  });
+}
