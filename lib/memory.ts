@@ -111,58 +111,82 @@ export async function saveExtractedMemory(
   sourceMessageId?: string | number
 ) {
   const supabase = getSupabase();
-  const writes: Promise<unknown>[] = [];
-
   if (extraction.facts?.length) {
-    writes.push(
-      Promise.resolve(
-        supabase.from("facts").insert(
-          extraction.facts.map((fact) => ({
-            content: fact.content,
-            source_message_id: sourceMessageId
-          }))
-        )
-      )
+    await insertWithFallbacks(
+      "facts",
+      extraction.facts.map((fact) => ({
+        content: fact.content,
+        source_message_id: sourceMessageId
+      })),
+      extraction.facts.map((fact) => ({
+        content: fact.content
+      }))
     );
   }
 
   if (extraction.entities?.length) {
-    writes.push(
-      Promise.resolve(
-        supabase.from("entities").insert(
-          extraction.entities.map((entity) => ({
-            name: entity.name,
-            type: entity.type ?? "unknown",
-            description: entity.description ?? null,
-            source_message_id: sourceMessageId
-          }))
-        )
-      )
+    await insertWithFallbacks(
+      "entities",
+      extraction.entities.map((entity) => ({
+        name: entity.name,
+        type: entity.type ?? "unknown",
+        description: entity.description ?? null,
+        source_message_id: sourceMessageId
+      })),
+      extraction.entities.map((entity) => ({
+        name: entity.name,
+        type: entity.type ?? "unknown",
+        source_message_id: sourceMessageId
+      })),
+      extraction.entities.map((entity) => ({
+        name: entity.name,
+        type: entity.type ?? "unknown"
+      })),
+      extraction.entities.map((entity) => ({
+        name: entity.name
+      }))
     );
   }
 
   if (extraction.tasks?.length) {
-    writes.push(
-      Promise.resolve(
-        supabase.from("tasks").insert(
-          extraction.tasks.map((task) => ({
-            title: task.title,
-            status: task.status ?? "open",
-            description: task.description ?? null,
-            source_message_id: sourceMessageId
-          }))
-        )
-      )
+    await insertWithFallbacks(
+      "tasks",
+      extraction.tasks.map((task) => ({
+        title: task.title,
+        status: task.status ?? "open",
+        description: task.description ?? null,
+        source_message_id: sourceMessageId
+      })),
+      extraction.tasks.map((task) => ({
+        title: task.title,
+        status: task.status ?? "open",
+        source_message_id: sourceMessageId
+      })),
+      extraction.tasks.map((task) => ({
+        title: task.title,
+        status: task.status ?? "open"
+      })),
+      extraction.tasks.map((task) => ({
+        title: task.title
+      }))
     );
   }
+}
 
-  const results = await Promise.allSettled(writes);
-  results.forEach((result) => {
-    if (result.status === "rejected") {
-      console.error("Memory write failed:", result.reason);
-    } else {
-      const value = result.value as { error?: { message?: string } };
-      if (value.error) console.error("Memory write failed:", value.error.message);
-    }
-  });
+async function insertWithFallbacks(
+  table: "facts" | "entities" | "tasks",
+  ...payloads: Record<string, unknown>[][]
+) {
+  const supabase = getSupabase();
+  let lastError: string | undefined;
+
+  for (const payload of payloads) {
+    const { error } = await supabase.from(table).insert(payload);
+    if (!error) return;
+    lastError = error.message;
+  }
+
+  if (lastError) {
+    console.error(`Memory write failed for ${table}:`, lastError);
+  }
 }
