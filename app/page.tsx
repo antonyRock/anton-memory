@@ -17,6 +17,7 @@ export default function Home() {
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const hasMessages = messages.length > 0;
 
   useEffect(() => {
     navigator.serviceWorker?.register("/sw.js").catch(() => undefined);
@@ -133,7 +134,7 @@ export default function Home() {
   }
 
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${hasMessages ? "with-messages" : "empty"}`}>
       <header className="top-bar">
         <div className="brand">
           <div className="brand-mark">B</div>
@@ -145,8 +146,8 @@ export default function Home() {
         <div className="status">{note}</div>
       </header>
 
-      <section className="messages" aria-live="polite">
-        {messages.length === 0 ? (
+      <section className={`messages ${hasMessages ? "" : "empty"}`} aria-live="polite">
+        {!hasMessages ? (
           <div className="empty-state">
             <div>
               <h1>Рад тебя видеть, Антон.</h1>
@@ -174,7 +175,7 @@ export default function Home() {
         <div ref={endRef} />
       </section>
 
-      <div className="composer-wrap">
+      <div className={`composer-wrap ${hasMessages ? "" : "empty"}`}>
         <form className="composer" onSubmit={onSubmit}>
           <button
             aria-label={isRecording ? "Остановить запись" : "Начать запись"}
@@ -196,7 +197,7 @@ export default function Home() {
                 void sendMessage(input);
               }
             }}
-            placeholder="Напишите сообщение..."
+            placeholder="Спросите что-нибудь..."
             rows={1}
             value={input}
           />
@@ -214,7 +215,7 @@ export default function Home() {
             )}
           </button>
         </form>
-        <div className="composer-note">{note}</div>
+        {hasMessages ? <div className="composer-note">{note}</div> : null}
       </div>
     </main>
   );
