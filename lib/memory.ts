@@ -141,6 +141,13 @@ export async function saveExtractedMemory(
       })),
       extraction.facts.map((fact) => ({
         content: fact.content
+      })),
+      extraction.facts.map((fact) => ({
+        fact: fact.content,
+        source_message_id: sourceMessageId
+      })),
+      extraction.facts.map((fact) => ({
+        fact: fact.content
       }))
     );
   }

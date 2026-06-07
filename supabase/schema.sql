@@ -52,6 +52,7 @@ alter table public.messages add column if not exists metadata jsonb default '{}'
 alter table public.messages add column if not exists created_at timestamptz default now();
 
 alter table public.facts add column if not exists content text;
+alter table public.facts add column if not exists fact text;
 alter table public.facts add column if not exists source_message_id text;
 alter table public.facts add column if not exists confidence numeric(4, 3);
 alter table public.facts add column if not exists metadata jsonb default '{}'::jsonb;
@@ -111,6 +112,9 @@ create index if not exists facts_created_at_idx
 
 create index if not exists facts_content_trgm_idx
   on public.facts using gin (content gin_trgm_ops);
+
+create index if not exists facts_fact_trgm_idx
+  on public.facts using gin (fact gin_trgm_ops);
 
 create index if not exists entities_created_at_idx
   on public.entities (created_at desc);
