@@ -36,41 +36,7 @@ OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 
 ## Ожидаемая схема Supabase
 
-Если таблицы уже есть, проверьте, что в них есть минимум эти колонки. Можно адаптировать код под текущую схему в `lib/memory.ts`.
-
-```sql
-create table if not exists messages (
-  id uuid primary key default gen_random_uuid(),
-  role text not null check (role in ('user', 'assistant')),
-  content text not null,
-  created_at timestamptz not null default now()
-);
-
-create table if not exists facts (
-  id uuid primary key default gen_random_uuid(),
-  content text not null,
-  source_message_id uuid null,
-  created_at timestamptz not null default now()
-);
-
-create table if not exists entities (
-  id uuid primary key default gen_random_uuid(),
-  name text not null,
-  type text not null default 'unknown',
-  description text null,
-  source_message_id uuid null,
-  created_at timestamptz not null default now()
-);
-
-create table if not exists tasks (
-  id uuid primary key default gen_random_uuid(),
-  title text not null,
-  status text not null default 'open',
-  description text null,
-  source_message_id uuid null,
-  created_at timestamptz not null default now()
-);
-```
+SQL для таблиц и индексов лежит в `supabase/schema.sql`. Его можно выполнить в Supabase SQL Editor.
 
 Для MVP используется service role key, поэтому Row Level Security можно оставить включенным, но backend должен иметь доступ через server env. Для полноценного multi-user продукта следующим шагом стоит добавить `user_id`, auth и RLS policies.
 
