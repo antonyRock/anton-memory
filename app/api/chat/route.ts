@@ -20,9 +20,9 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Message is required." }, { status: 400 });
     }
 
-    const userMessageId = await saveMessage("user", userMessage);
     const memory = await retrieveMemory(userMessage);
     const memoryPrompt = formatMemoryForPrompt(memory);
+    const userMessageId = await saveMessage("user", userMessage);
 
     const completion = await getOpenAI().chat.completions.create({
       model: chatModel,
@@ -32,7 +32,7 @@ export async function POST(request: Request) {
           role: "system",
           content: [
             "You are a warm, concise assistant for a personal second-brain app.",
-            "Use the provided memory when it is relevant.",
+            "Use the provided memory and recent user messages when they are relevant.",
             "When the user asks you to remember, save, note, or record new information, acknowledge it naturally and do not claim that memory has no data about it.",
             "If the user asks about their personal data, subscriptions, tasks, projects, people, preferences, or history, rely only on the provided memory.",
             "If the provided memory does not contain the answer, say that there is no data in memory. Do not invent personal facts.",

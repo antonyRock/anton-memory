@@ -4,6 +4,7 @@ export type MemoryContext = {
   facts: Record<string, unknown>[];
   entities: Record<string, unknown>[];
   tasks: Record<string, unknown>[];
+  recentMessages: Record<string, unknown>[];
 };
 
 export type MemoryExtraction = {
@@ -38,17 +39,36 @@ async function safeSelect(table: "facts" | "entities" | "tasks") {
   return data ?? [];
 }
 
+async function safeSelectRecentMessages() {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("messages")
+    .select("role, content, created_at")
+    .eq("role", "user")
+    .order("created_at", { ascending: false })
+    .limit(SEARCH_POOL_LIMIT);
+
+  if (error) {
+    console.error("Memory select failed for messages:", error.message);
+    return [];
+  }
+
+  return data ?? [];
+}
+
 export async function retrieveMemory(query: string): Promise<MemoryContext> {
-  const [facts, entities, tasks] = await Promise.all([
+  const [facts, entities, tasks, recentMessages] = await Promise.all([
     safeSelect("facts"),
     safeSelect("entities"),
-    safeSelect("tasks")
+    safeSelect("tasks"),
+    safeSelectRecentMessages()
   ]);
 
   return {
     facts: rankRecords(facts, query),
     entities: rankRecords(entities, query),
-    tasks: rankRecords(tasks, query)
+    tasks: rankRecords(tasks, query),
+    recentMessages: rankRecords(recentMessages, query)
   };
 }
 
@@ -56,7 +76,8 @@ export function formatMemoryForPrompt(memory: MemoryContext) {
   const sections = [
     ["Facts", memory.facts],
     ["Entities", memory.entities],
-    ["Tasks", memory.tasks]
+    ["Tasks", memory.tasks],
+    ["Recent user messages", memory.recentMessages]
   ] as const;
 
   const formatted = sections
