@@ -41,6 +41,7 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const hasMessages = messages.length > 0;
+  const showThinking = isLoading && messages[messages.length - 1]?.role !== "assistant";
 
   useEffect(() => {
     navigator.serviceWorker?.register("/sw.js").catch(() => undefined);
@@ -85,15 +86,21 @@ export default function Home() {
         )
       });
 
-      const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.error ?? "Не удалось получить ответ");
+        throw new Error(await readError(response));
       }
 
-      setMessages((current) => [
-        ...current,
-        { role: "assistant", content: data.answer, imageUrl: data.imageUrl }
-      ]);
+      if (imageIntent) {
+        const data = await response.json();
+        setMessages((current) => [
+          ...current,
+          { role: "assistant", content: data.answer, imageUrl: data.imageUrl }
+        ]);
+        setNote("Готово");
+        return;
+      }
+
+      await streamAssistantMessage(response);
       setNote("Готово");
     } catch (error) {
       setMessages((current) => [
@@ -109,6 +116,55 @@ export default function Home() {
       setNote("Нужна проверка настроек");
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function streamAssistantMessage(response: Response) {
+    const reader = response.body?.getReader();
+    if (!reader) {
+      throw new Error("Ответ пришёл без stream body.");
+    }
+
+    const decoder = new TextDecoder();
+    let fullText = "";
+
+    setMessages((current) => [...current, { role: "assistant", content: "" }]);
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      fullText += decoder.decode(value, { stream: true });
+      setMessages((current) => {
+        const next = [...current];
+        const last = next[next.length - 1];
+        if (last?.role === "assistant") {
+          next[next.length - 1] = { ...last, content: fullText };
+        }
+        return next;
+      });
+    }
+
+    const trailing = decoder.decode();
+    if (trailing) {
+      fullText += trailing;
+      setMessages((current) => {
+        const next = [...current];
+        const last = next[next.length - 1];
+        if (last?.role === "assistant") {
+          next[next.length - 1] = { ...last, content: fullText };
+        }
+        return next;
+      });
+    }
+  }
+
+  async function readError(response: Response) {
+    try {
+      const data = await response.json();
+      return data.error ?? "Не удалось получить ответ";
+    } catch {
+      return "Не удалось получить ответ";
     }
   }
 
@@ -299,7 +355,7 @@ export default function Home() {
             </article>
           ))
         )}
-        {isLoading ? (
+        {showThinking ? (
           <article className="message-row assistant">
             <div className="avatar">B</div>
             <div className="bubble">Думаю...</div>
