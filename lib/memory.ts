@@ -68,7 +68,7 @@ export async function retrieveMemory(query: string): Promise<MemoryContext> {
     facts: rankRecords(facts, query),
     entities: rankRecords(entities, query),
     tasks: rankRecords(tasks, query),
-    recentMessages: rankRecords(recentMessages, query)
+    recentMessages: rankRecords(recentMessages, query, { requireMatch: true })
   };
 }
 
@@ -92,13 +92,17 @@ export function formatMemoryForPrompt(memory: MemoryContext) {
   return formatted;
 }
 
-function rankRecords(records: Record<string, unknown>[], query: string) {
+function rankRecords(
+  records: Record<string, unknown>[],
+  query: string,
+  options: { requireMatch?: boolean } = {}
+) {
   const terms = query
     .toLowerCase()
     .split(/[^a-zа-яё0-9]+/i)
     .filter((term) => term.length >= 3);
 
-  return records
+  const ranked = records
     .map((record, index) => {
       const text = compactRecord(record).toLowerCase();
       const score = terms.reduce(
@@ -107,9 +111,12 @@ function rankRecords(records: Record<string, unknown>[], query: string) {
       );
       return { record, score, index };
     })
+    .filter(({ score }) => !options.requireMatch || score > 0)
     .sort((a, b) => b.score - a.score || a.index - b.index)
     .slice(0, SEARCH_LIMIT)
     .map(({ record }) => record);
+
+  return ranked;
 }
 
 export async function saveMessage(role: "user" | "assistant", content: string) {
