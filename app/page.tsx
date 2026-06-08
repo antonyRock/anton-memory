@@ -1,13 +1,24 @@
 "use client";
 
-import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  FormEvent,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent,
+  type ReactNode
+} from "react";
 import {
   Check,
+  ChevronDown,
+  ChevronRight,
   FileSpreadsheet,
   FileText,
+  GripVertical,
   Image as ImageIcon,
   Loader2,
-  Menu,
   Mic,
   PanelLeftClose,
   PanelLeftOpen,
@@ -56,44 +67,65 @@ type SearchResult = {
   snippet: string;
 };
 
+const DEFAULT_CHAT_TITLE = "Новый чат";
+const MIN_SIDEBAR_WIDTH = 240;
+const MAX_SIDEBAR_WIDTH = 420;
+const DEFAULT_SIDEBAR_WIDTH = 280;
+
 export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string | number | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [search, setSearch] = useState("");
-  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [recentCollapsed, setRecentCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(DEFAULT_SIDEBAR_WIDTH);
+  const [highlightTerm, setHighlightTerm] = useState("");
+  const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [previewImage, setPreviewImage] = useState<FileAttachment | null>(null);
-  const [note, setNote] = useState("Готово к вводу");
+  const [note, setNote] = useState("Готово");
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const recordingActionRef = useRef<"send" | "cancel">("send");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const messagesRef = useRef<HTMLElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
   const pendingResetScrollRef = useRef(false);
+  const resizingSidebarRef = useRef(false);
   const hasMessages = messages.length > 0;
   const showThinking = isLoading && messages[messages.length - 1]?.role !== "assistant";
+  const matchCount = countMatchesInMessages(messages, highlightTerm);
 
   useEffect(() => {
     navigator.serviceWorker?.register("/sw.js").catch(() => undefined);
     setSidebarCollapsed(window.localStorage.getItem("sidebarCollapsed") === "true");
+    setRecentCollapsed(window.localStorage.getItem("recentCollapsed") === "true");
+    const savedWidth = Number(window.localStorage.getItem("sidebarWidth"));
+    if (Number.isFinite(savedWidth)) setSidebarWidth(clampSidebarWidth(savedWidth));
     void bootstrap();
   }, []);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
-      void loadConversations(search, true);
+      void loadConversations(search);
     }, 250);
     return () => window.clearTimeout(handle);
   }, [search]);
+
+  useEffect(() => {
+    const term = search.trim();
+    setHighlightTerm(term);
+    setActiveMatchIndex(0);
+  }, [search, activeConversationId]);
 
   useEffect(() => {
     if (!shouldAutoScrollRef.current) return;
@@ -106,12 +138,36 @@ export default function Home() {
     pendingResetScrollRef.current = false;
   }, [messages, activeConversationId]);
 
+  useLayoutEffect(() => {
+    resizeComposerTextarea();
+  }, [input]);
+
+  useLayoutEffect(() => {
+    if (!highlightTerm || matchCount === 0) return;
+    const active = messagesRef.current?.querySelector(".search-highlight.active");
+    active?.scrollIntoView({ block: "center", behavior: "smooth" });
+  }, [activeMatchIndex, highlightTerm, matchCount, messages]);
+
   useEffect(() => {
     window.localStorage.setItem("sidebarCollapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
+  useEffect(() => {
+    window.localStorage.setItem("recentCollapsed", String(recentCollapsed));
+  }, [recentCollapsed]);
+
+  useEffect(() => {
+    window.localStorage.setItem("sidebarWidth", String(sidebarWidth));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (activeMatchIndex >= matchCount) {
+      setActiveMatchIndex(Math.max(0, matchCount - 1));
+    }
+  }, [activeMatchIndex, matchCount]);
+
   async function bootstrap() {
-    const loaded = await loadConversations("", true);
+    const loaded = await loadConversations("");
     const savedConversationId = window.localStorage.getItem("activeConversationId");
     const restored =
       loaded.find((conversation) => String(conversation.id) === savedConversationId) ?? loaded[0];
@@ -125,7 +181,7 @@ export default function Home() {
     await newChat();
   }
 
-  async function loadConversations(query = search, _keepSelection = true) {
+  async function loadConversations(query = search) {
     try {
       const response = await fetch(`/api/conversations?search=${encodeURIComponent(query)}`);
       const data = await response.json();
@@ -168,6 +224,14 @@ export default function Home() {
   }
 
   async function newChat() {
+    if (activeConversationId && messages.length === 0 && !isLoading) {
+      setInput("");
+      setAttachments([]);
+      setSearch("");
+      setSidebarOpen(false);
+      return activeConversationId;
+    }
+
     try {
       const response = await fetch("/api/conversations", { method: "POST" });
       const data = await response.json();
@@ -180,12 +244,13 @@ export default function Home() {
       setActiveConversationId(conversation.id);
       window.localStorage.setItem("activeConversationId", String(conversation.id));
       shouldAutoScrollRef.current = false;
+      pendingResetScrollRef.current = true;
       setMessages([]);
       setInput("");
       setAttachments([]);
       setSearch("");
       setSidebarOpen(false);
-      setNote("Новый чат");
+      setNote(DEFAULT_CHAT_TITLE);
       return conversation.id;
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Не удалось создать чат");
@@ -205,9 +270,62 @@ export default function Home() {
 
   function resetMessagesScroll() {
     if (messagesRef.current) messagesRef.current.scrollTop = 0;
-    window.scrollTo({ top: 0, behavior: "instant" });
+    window.scrollTo(0, 0);
     document.documentElement.scrollTop = 0;
     document.body.scrollTop = 0;
+  }
+
+  function resizeComposerTextarea() {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 160 ? "auto" : "hidden";
+  }
+
+  function openSearchResult(result: SearchResult) {
+    const term = search.trim();
+    if (term) {
+      setHighlightTerm(term);
+      setActiveMatchIndex(0);
+    }
+    openConversation(result.conversationId);
+  }
+
+  function clearSearchHighlight() {
+    setHighlightTerm("");
+    setActiveMatchIndex(0);
+  }
+
+  function showNextMatch() {
+    if (matchCount === 0) return;
+    setActiveMatchIndex((current) => (current + 1) % matchCount);
+  }
+
+  function showPreviousMatch() {
+    if (matchCount === 0) return;
+    setActiveMatchIndex((current) => (current - 1 + matchCount) % matchCount);
+  }
+
+  function startSidebarResize(event: PointerEvent<HTMLDivElement>) {
+    if (window.matchMedia("(max-width: 800px)").matches) return;
+    event.preventDefault();
+    resizingSidebarRef.current = true;
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    const onMove = (moveEvent: globalThis.PointerEvent) => {
+      if (!resizingSidebarRef.current) return;
+      setSidebarWidth(clampSidebarWidth(moveEvent.clientX));
+    };
+
+    const onUp = () => {
+      resizingSidebarRef.current = false;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   }
 
   async function sendMessage(text: string, files = attachments) {
@@ -267,7 +385,7 @@ export default function Home() {
       }
 
       setNote("Готово");
-      void loadConversations(search, true);
+      void loadConversations(search);
     } catch (error) {
       setMessages((current) => [
         ...current,
@@ -452,6 +570,7 @@ export default function Home() {
       className={`app-shell ${sidebarOpen ? "sidebar-open" : ""} ${
         sidebarCollapsed ? "sidebar-collapsed" : ""
       }`}
+      style={{ "--sidebar-width": `${sidebarWidth}px` } as CSSProperties}
     >
       {sidebarCollapsed ? (
         <button
@@ -465,92 +584,114 @@ export default function Home() {
       ) : null}
 
       <aside className="sidebar">
-        <div className="sidebar-header">
-          <div className="sidebar-brand">Второй мозг</div>
-          <button
-            aria-label="Скрыть sidebar"
-            className="sidebar-close"
-            onClick={() => {
-              if (window.matchMedia("(max-width: 800px)").matches) {
-                setSidebarOpen(false);
-              } else {
-                setSidebarCollapsed(true);
-              }
-            }}
-            type="button"
-          >
-            <PanelLeftClose size={18} />
-          </button>
-        </div>
-
-        <div className="sidebar-actions">
-          <button className="sidebar-action" onClick={() => void newChat()} type="button">
-            <Plus size={18} />
-            Новый чат
-          </button>
-          <button
-            className="sidebar-action"
-            onClick={() => setSearchOpen((current) => !current)}
-            type="button"
-          >
-            <Search size={18} />
-            Искать чаты
-          </button>
-          <button className="sidebar-action" type="button">
-            <Paperclip size={18} />
-            Библиотека / Файлы
-          </button>
-          <button className="sidebar-action" type="button">
-            <Settings size={18} />
-            Настройки
-          </button>
-        </div>
-
-        {searchOpen ? (
-          <label className="search-box">
-            <Search size={17} />
-            <input
-              aria-label="Поиск"
-              autoFocus
-              onChange={(event) => setSearch(event.target.value)}
-              placeholder="Поиск по чатам и памяти"
-              value={search}
-            />
-          </label>
-        ) : null}
-
-        <div className="sidebar-section-title">Недавние</div>
-        <nav className="conversation-list">
-          {conversations.map((conversation) => (
+        <div className="sidebar-fixed">
+          <div className="sidebar-header">
+            <div className="sidebar-brand">Второй мозг</div>
             <button
-              className={`conversation-item ${
-                String(conversation.id) === String(activeConversationId) ? "active" : ""
-              }`}
-              key={conversation.id}
-              onClick={() => openConversation(conversation.id)}
+              aria-label="Скрыть sidebar"
+              className="sidebar-close"
+              onClick={() => {
+                if (window.matchMedia("(max-width: 800px)").matches) {
+                  setSidebarOpen(false);
+                } else {
+                  setSidebarCollapsed(true);
+                }
+              }}
               type="button"
             >
-              <span>{conversation.title || "Новый чат"}</span>
+              <PanelLeftClose size={18} />
             </button>
-          ))}
-        </nav>
-
-        {search.trim() && searchResults.length > 0 ? (
-          <div className="search-results">
-            <div className="sidebar-section-title">Найдено</div>
-            {searchResults.slice(0, 12).map((result) => (
-              <button
-                className="search-result"
-                key={`${result.type}-${result.id}`}
-                onClick={() => openConversation(result.conversationId)}
-                type="button"
-              >
-                <strong>{result.title}</strong>
-                <span>{result.snippet}</span>
-              </button>
-            ))}
           </div>
-        ) : null}
+
+          <div className="sidebar-actions">
+            <button className="sidebar-action" onClick={() => void newChat()} type="button">
+              <Plus size={18} />
+              Новый чат
+            </button>
+            <button
+              className="sidebar-action"
+              onClick={() => setSearchOpen(true)}
+              type="button"
+            >
+              <Search size={18} />
+              Искать чаты
+            </button>
+            <button className="sidebar-action" type="button">
+              <Paperclip size={18} />
+              Библиотека / Файлы
+            </button>
+            <button className="sidebar-action" type="button">
+              <Settings size={18} />
+              Настройки
+            </button>
+          </div>
+
+          {searchOpen ? (
+            <label className="search-box">
+              <Search size={17} />
+              <input
+                aria-label="Поиск"
+                autoFocus
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Поиск по чатам и памяти"
+                value={search}
+              />
+            </label>
+          ) : null}
+        </div>
+
+        <div className="sidebar-scroll">
+          <button
+            className="sidebar-section-toggle"
+            onClick={() => setRecentCollapsed((current) => !current)}
+            type="button"
+          >
+            {recentCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+            Недавние
+          </button>
+
+          {!recentCollapsed ? (
+            <nav className="conversation-list">
+              {conversations.map((conversation, index) => (
+                <button
+                  className={`conversation-item ${
+                    String(conversation.id) === String(activeConversationId) ? "active" : ""
+                  }`}
+                  key={conversation.id}
+                  onClick={() => openConversation(conversation.id)}
+                  type="button"
+                >
+                  <span>{conversationTitle(conversation, conversations, index)}</span>
+                </button>
+              ))}
+            </nav>
+          ) : null}
+
+          {search.trim() && searchResults.length > 0 ? (
+            <div className="search-results">
+              <div className="sidebar-section-title">Найдено</div>
+              {searchResults.slice(0, 12).map((result) => (
+                <button
+                  className="search-result"
+                  key={`${result.type}-${result.id}`}
+                  onClick={() => openSearchResult(result)}
+                  type="button"
+                >
+                  <strong>{result.title}</strong>
+                  <span>{result.snippet}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div
+          aria-hidden="true"
+          className="sidebar-resize-handle"
+          onPointerDown={startSidebarResize}
+        >
+          <GripVertical size={14} />
+        </div>
       </aside>
 
       {sidebarOpen ? (
@@ -564,14 +705,10 @@ export default function Home() {
 
       <section className={`chat-shell ${hasMessages ? "with-messages" : "empty"}`}>
         <header className="top-bar">
+          {/*
           <button
             aria-label="История"
-            className="mobile-menu-button"
-            onClick={() => setSidebarOpen(true)}
-            type="button"
-          >
-            <Menu size={20} />
-          </button>
+          */}
           <div className="brand">
             <div className="brand-mark">B</div>
             <div className="brand-title">
@@ -579,7 +716,6 @@ export default function Home() {
               <span>ChatGPT-like с личной памятью</span>
             </div>
           </div>
-          <div className="status">{note}</div>
         </header>
 
         <section
@@ -604,7 +740,16 @@ export default function Home() {
               >
                 {message.role === "assistant" ? <div className="avatar">B</div> : null}
                 <div className="bubble">
-                  {message.content ? <div>{message.content}</div> : null}
+                  {message.content ? (
+                    <div>
+                      {renderHighlightedText(
+                        message.content,
+                        highlightTerm,
+                        activeMatchIndex,
+                        countMatchesInMessages(messages.slice(0, index), highlightTerm)
+                      )}
+                    </div>
+                  ) : null}
                   {message.attachments?.length ? (
                     <MessageAttachments
                       attachments={message.attachments}
@@ -628,6 +773,22 @@ export default function Home() {
         </section>
 
         <div className={`composer-wrap ${hasMessages ? "" : "empty"}`}>
+          {highlightTerm && matchCount > 0 ? (
+            <div className="search-navigation">
+              <span>
+                {activeMatchIndex + 1}/{matchCount}
+              </span>
+              <button onClick={showPreviousMatch} type="button">
+                Предыдущее
+              </button>
+              <button onClick={showNextMatch} type="button">
+                Следующее
+              </button>
+              <button aria-label="Убрать подсветку" onClick={clearSearchHighlight} type="button">
+                <X size={14} />
+              </button>
+            </div>
+          ) : null}
           {isRecording ? (
             <div className="recording-pill">
               <span className="recording-dot" />
@@ -686,6 +847,7 @@ export default function Home() {
               <Mic size={20} />
             </button>
             <textarea
+              ref={textareaRef}
               aria-label="Сообщение"
               disabled={isLoading || isRecording}
               onChange={(event) => setInput(event.target.value)}
@@ -746,6 +908,95 @@ function replaceLastAssistantMessage(messages: ChatMessage[], content: string) {
     next[next.length - 1] = { ...last, content };
   }
   return next;
+}
+
+function renderHighlightedText(
+  text: string,
+  term: string,
+  activeMatchIndex: number,
+  startIndex: number
+) {
+  const query = term.trim();
+  if (!query) return text;
+
+  const lowerText = text.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  let matchIndex = startIndex;
+
+  while (true) {
+    const found = lowerText.indexOf(lowerQuery, cursor);
+    if (found === -1) break;
+
+    if (found > cursor) parts.push(text.slice(cursor, found));
+
+    const value = text.slice(found, found + query.length);
+    const isActive = matchIndex === activeMatchIndex;
+    parts.push(
+      <mark
+        className={`search-highlight ${isActive ? "active" : ""}`}
+        key={`${found}-${matchIndex}`}
+      >
+        {value}
+      </mark>
+    );
+    cursor = found + query.length;
+    matchIndex += 1;
+  }
+
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts.length > 0 ? parts : text;
+}
+
+function countMatchesInMessages(messages: ChatMessage[], term: string) {
+  const query = term.trim();
+  if (!query) return 0;
+  return messages.reduce((sum, message) => sum + countMatchesInText(message.content, query), 0);
+}
+
+function countMatchesInText(text: string, term: string) {
+  const query = term.trim().toLowerCase();
+  if (!query) return 0;
+  const source = text.toLowerCase();
+  let count = 0;
+  let cursor = 0;
+
+  while (true) {
+    const found = source.indexOf(query, cursor);
+    if (found === -1) return count;
+    count += 1;
+    cursor = found + query.length;
+  }
+}
+
+function clampSidebarWidth(width: number) {
+  return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, Math.round(width)));
+}
+
+function conversationTitle(
+  conversation: Conversation,
+  conversations: Conversation[],
+  index: number
+) {
+  const base = normalizeConversationTitle(conversation.title);
+  const sameTitle = conversations.filter(
+    (item) => normalizeConversationTitle(item.title) === base
+  );
+  if (sameTitle.length <= 1) return base;
+
+  const occurrence =
+    conversations
+      .slice(0, index + 1)
+      .filter((item) => normalizeConversationTitle(item.title) === base).length || 1;
+  return `${base} ${occurrence}`;
+}
+
+function normalizeConversationTitle(title: string | null) {
+  const trimmed = title?.trim();
+  if (!trimmed) return DEFAULT_CHAT_TITLE;
+  if (trimmed === "История") return "Старые сообщения";
+  return trimmed;
 }
 
 function MessageAttachments({
