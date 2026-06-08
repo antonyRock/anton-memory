@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { chatModel, getOpenAI } from "@/lib/openai";
+import { getDocumentsForPrompt, getImageInputsForVision } from "@/lib/documents";
 import {
   formatMemoryForPrompt,
   retrieveMemory,
@@ -13,7 +14,10 @@ export const maxDuration = 60;
 
 export async function POST(request: Request) {
   try {
-    const { message } = (await request.json()) as { message?: string };
+    const { message, documentIds } = (await request.json()) as {
+      message?: string;
+      documentIds?: Array<string | number>;
+    };
     const userMessage = message?.trim();
 
     if (!userMessage) {
@@ -22,7 +26,19 @@ export async function POST(request: Request) {
 
     const memory = await retrieveMemory(userMessage);
     const memoryPrompt = formatMemoryForPrompt(memory);
+    const documentsPrompt = await getDocumentsForPrompt(documentIds ?? []);
+    const imageInputs = await getImageInputsForVision(documentIds ?? []);
     const userMessageId = await saveMessage("user", userMessage);
+    const userContent =
+      imageInputs.length > 0
+        ? [
+            { type: "text" as const, text: userMessage },
+            ...imageInputs.map((image) => ({
+              type: "image_url" as const,
+              image_url: { url: image.dataUrl }
+            }))
+          ]
+        : userMessage;
 
     const completion = await getOpenAI().chat.completions.create({
       model: chatModel,
@@ -46,7 +62,15 @@ export async function POST(request: Request) {
           role: "system",
           content: `Internal memory context. Use silently; do not mention this context unless explicitly asked how the app works.\n${memoryPrompt}`
         },
-        { role: "user", content: userMessage }
+        ...(documentsPrompt
+          ? [
+              {
+                role: "system" as const,
+                content: `Uploaded file context. The user has uploaded files that were processed before this request. Use this content to answer questions about the files. Do not say you cannot access the files.\n${documentsPrompt}`
+              }
+            ]
+          : []),
+        { role: "user", content: userContent }
       ]
     });
 

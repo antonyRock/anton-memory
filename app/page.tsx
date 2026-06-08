@@ -10,10 +10,13 @@ type ChatMessage = {
 };
 
 type Attachment = {
+  id?: string | number;
   name: string;
   type: string;
   size: number;
-  text?: string;
+  status: "uploading" | "ready" | "error";
+  error?: string;
+  summary?: string | null;
 };
 
 export default function Home() {
@@ -41,8 +44,12 @@ export default function Home() {
   async function sendMessage(text: string, files = attachments) {
     const trimmed = text.trim();
     if ((!trimmed && files.length === 0) || isLoading) return;
+    if (files.some((file) => file.status === "uploading")) {
+      setNote("Дождитесь загрузки файла");
+      return;
+    }
 
-    const messageForApi = buildMessageWithAttachments(trimmed, files);
+    const readyFiles = files.filter((file) => file.status === "ready" && file.id);
     const displayText = trimmed || files.map((file) => file.name).join(", ");
 
     const nextMessages: ChatMessage[] = [
@@ -63,7 +70,7 @@ export default function Home() {
         body: JSON.stringify(
           isImageRequest
             ? { prompt: trimmed }
-            : { message: messageForApi, attachments: files }
+            : { message: trimmed || "Посмотри прикрепленные файлы.", documentIds: readyFiles.map((file) => file.id) }
         )
       });
 
@@ -172,24 +179,69 @@ export default function Home() {
 
   async function onFilesSelected(fileList: FileList | null) {
     if (!fileList?.length) return;
-    const nextAttachments: Attachment[] = [];
+    const selectedFiles = Array.from(fileList);
+    const pendingAttachments: Attachment[] = selectedFiles.map((file) => ({
+      name: file.name,
+      type: file.type || "application/octet-stream",
+      size: file.size,
+      status: "uploading"
+    }));
 
-    for (const file of Array.from(fileList)) {
-      const attachment: Attachment = {
-        name: file.name,
-        type: file.type || "application/octet-stream",
-        size: file.size
-      };
+    setAttachments((current) => [...current, ...pendingAttachments]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    setNote("Загружаю файл");
 
-      if (isTextLikeFile(file) && file.size <= 500_000) {
-        attachment.text = await file.text();
+    const formData = new FormData();
+    selectedFiles.forEach((file) => formData.append("files", file));
+
+    try {
+      const response = await fetch("/api/files", {
+        method: "POST",
+        body: formData
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error ?? "Не удалось загрузить файл");
       }
 
-      nextAttachments.push(attachment);
+      setAttachments((current) => {
+        const next = [...current];
+        const start = next.length - pendingAttachments.length;
+        data.documents.forEach(
+          (
+            document: {
+              id: string | number;
+              fileName: string;
+              fileType: string;
+              fileSize: number;
+              summary?: string | null;
+            },
+            index: number
+          ) => {
+            next[start + index] = {
+              id: document.id,
+              name: document.fileName,
+              type: document.fileType,
+              size: document.fileSize,
+              status: "ready",
+              summary: document.summary
+            };
+          }
+        );
+        return next;
+      });
+      setNote("Файл готов");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Ошибка загрузки файла";
+      setAttachments((current) =>
+        current.map((attachment) =>
+          attachment.status === "uploading"
+            ? { ...attachment, status: "error", error: message }
+            : attachment
+        )
+      );
+      setNote(message);
     }
-
-    setAttachments((current) => [...current, ...nextAttachments]);
-    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   return (
@@ -267,6 +319,8 @@ export default function Home() {
                 type="button"
               >
                 {attachment.name}
+                {attachment.status === "uploading" ? "..." : ""}
+                {attachment.status === "error" ? " !" : ""}
               </button>
             ))}
           </div>
@@ -332,27 +386,6 @@ export default function Home() {
         {hasMessages ? <div className="composer-note">{note}</div> : null}
       </div>
     </main>
-  );
-}
-
-function buildMessageWithAttachments(message: string, attachments: Attachment[]) {
-  if (attachments.length === 0) return message;
-
-  const attachmentText = attachments
-    .map((attachment) => {
-      const header = `File: ${attachment.name} (${attachment.type}, ${attachment.size} bytes)`;
-      if (!attachment.text) return header;
-      return `${header}\nContent:\n${attachment.text.slice(0, 12000)}`;
-    })
-    .join("\n\n");
-
-  return [message, `Attached files:\n${attachmentText}`].filter(Boolean).join("\n\n");
-}
-
-function isTextLikeFile(file: File) {
-  return (
-    file.type.startsWith("text/") ||
-    /\.(txt|md|csv|json|xml|html|css|js|ts|tsx|jsx|py|sql|log)$/i.test(file.name)
   );
 }
 
