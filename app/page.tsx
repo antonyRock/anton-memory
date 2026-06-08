@@ -5,8 +5,11 @@ import {
   Check,
   FileText,
   Loader2,
+  Menu,
   Mic,
   Paperclip,
+  Plus,
+  Search,
   Send,
   Square,
   X
@@ -28,8 +31,29 @@ type Attachment = {
   summary?: string | null;
 };
 
+type Conversation = {
+  id: string | number;
+  title: string | null;
+  summary: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type SearchResult = {
+  type: string;
+  id: string | number;
+  conversationId?: string | number | null;
+  title: string;
+  snippet: string;
+};
+
 export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<string | number | null>(null);
+  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
+  const [search, setSearch] = useState("");
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -45,11 +69,84 @@ export default function Home() {
 
   useEffect(() => {
     navigator.serviceWorker?.register("/sw.js").catch(() => undefined);
+    void bootstrap();
   }, []);
+
+  useEffect(() => {
+    const handle = window.setTimeout(() => {
+      void loadConversations(search, false);
+    }, 250);
+    return () => window.clearTimeout(handle);
+  }, [search]);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
+
+  async function bootstrap() {
+    const loaded = await loadConversations("", false);
+    const first = loaded[0];
+    if (first) {
+      setActiveConversationId(first.id);
+      await loadMessages(first.id);
+    } else {
+      await newChat();
+    }
+  }
+
+  async function loadConversations(query = search, keepSelection = true) {
+    try {
+      const response = await fetch(`/api/conversations?search=${encodeURIComponent(query)}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить историю");
+      setConversations(data.conversations ?? []);
+      setSearchResults(data.results ?? []);
+      if (!keepSelection && data.conversations?.[0]) {
+        setActiveConversationId(data.conversations[0].id);
+      }
+      return (data.conversations ?? []) as Conversation[];
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось загрузить историю");
+      return [];
+    }
+  }
+
+  async function loadMessages(conversationId: string | number) {
+    try {
+      const response = await fetch(`/api/conversations/${conversationId}/messages`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить сообщения");
+      setMessages(
+        (data.messages ?? []).map((message: { role: "user" | "assistant"; content: string }) => ({
+          role: message.role,
+          content: message.content
+        }))
+      );
+      setSidebarOpen(false);
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось загрузить сообщения");
+    }
+  }
+
+  async function newChat() {
+    try {
+      const response = await fetch("/api/conversations", { method: "POST" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось создать чат");
+      const conversation = data.conversation as Conversation;
+      setConversations((current) => [conversation, ...current]);
+      setActiveConversationId(conversation.id);
+      setMessages([]);
+      setInput("");
+      setAttachments([]);
+      setSidebarOpen(false);
+      setNote("Новый чат");
+      return conversation.id;
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось создать чат");
+      return null;
+    }
+  }
 
   async function sendMessage(text: string, files = attachments) {
     const trimmed = text.trim();
@@ -58,6 +155,10 @@ export default function Home() {
       setNote("Дождитесь загрузки файла");
       return;
     }
+
+    let conversationId = activeConversationId;
+    if (!conversationId) conversationId = await newChat();
+    if (!conversationId) return;
 
     const readyFiles = files.filter((file) => file.status === "ready" && file.id);
     const readyDocumentIds = readyFiles.map((file) => file.id);
@@ -78,10 +179,11 @@ export default function Home() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
           imageIntent
-            ? { prompt: trimmed, documentIds: readyDocumentIds }
+            ? { prompt: trimmed, documentIds: readyDocumentIds, conversationId }
             : {
                 message: trimmed || "Посмотри прикреплённые файлы.",
-                documentIds: readyDocumentIds
+                documentIds: readyDocumentIds,
+                conversationId
               }
         )
       });
@@ -96,12 +198,12 @@ export default function Home() {
           ...current,
           { role: "assistant", content: data.answer, imageUrl: data.imageUrl }
         ]);
-        setNote("Готово");
-        return;
+      } else {
+        await streamAssistantMessage(response);
       }
 
-      await streamAssistantMessage(response);
       setNote("Готово");
+      void loadConversations(search, true);
     } catch (error) {
       setMessages((current) => [
         ...current,
@@ -121,9 +223,7 @@ export default function Home() {
 
   async function streamAssistantMessage(response: Response) {
     const reader = response.body?.getReader();
-    if (!reader) {
-      throw new Error("Ответ пришёл без stream body.");
-    }
+    if (!reader) throw new Error("Ответ пришёл без stream body.");
 
     const decoder = new TextDecoder();
     let fullText = "";
@@ -221,9 +321,7 @@ export default function Home() {
             body: formData
           });
           const data = await response.json();
-          if (!response.ok) {
-            throw new Error(data.error ?? "Не удалось распознать аудио");
-          }
+          if (!response.ok) throw new Error(data.error ?? "Не удалось распознать аудио");
           await sendMessage(data.text, [
             {
               id: data.documentId,
@@ -275,9 +373,7 @@ export default function Home() {
         body: formData
       });
       const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error ?? "Не удалось загрузить файл");
-      }
+      if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить файл");
 
       setAttachments((current) => {
         const next = [...current];
@@ -320,158 +416,243 @@ export default function Home() {
   }
 
   return (
-    <main className={`app-shell ${hasMessages ? "with-messages" : "empty"}`}>
-      <header className="top-bar">
-        <div className="brand">
-          <div className="brand-mark">B</div>
-          <div className="brand-title">
-            <strong>Второй мозг</strong>
-            <span>ChatGPT-like с личной памятью</span>
-          </div>
+    <main className={`app-shell ${sidebarOpen ? "sidebar-open" : ""}`}>
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <button className="new-chat-button" onClick={() => void newChat()} type="button">
+            <Plus size={18} />
+            Новый чат
+          </button>
+          <button
+            aria-label="Закрыть историю"
+            className="sidebar-close"
+            onClick={() => setSidebarOpen(false)}
+            type="button"
+          >
+            <X size={18} />
+          </button>
         </div>
-        <div className="status">{note}</div>
-      </header>
-
-      <section className={`messages ${hasMessages ? "" : "empty"}`} aria-live="polite">
-        {!hasMessages ? (
-          <div className="empty-state">
-            <div>
-              <h1>Рад тебя видеть, Антон.</h1>
-            </div>
-          </div>
-        ) : (
-          messages.map((message, index) => (
-            <article
-              className={`message-row ${message.role}`}
-              key={`${message.role}-${index}`}
+        <label className="search-box">
+          <Search size={17} />
+          <input
+            aria-label="Поиск"
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Поиск"
+            value={search}
+          />
+        </label>
+        <nav className="conversation-list">
+          {conversations.map((conversation) => (
+            <button
+              className={`conversation-item ${
+                String(conversation.id) === String(activeConversationId) ? "active" : ""
+              }`}
+              key={conversation.id}
+              onClick={() => {
+                setActiveConversationId(conversation.id);
+                void loadMessages(conversation.id);
+              }}
+              type="button"
             >
-              {message.role === "assistant" ? <div className="avatar">B</div> : null}
-              <div className="bubble">
-                {message.content}
-                {message.imageUrl ? (
-                  <img className="generated-image" src={message.imageUrl} alt="Generated result" />
-                ) : null}
-              </div>
-            </article>
-          ))
-        )}
-        {showThinking ? (
-          <article className="message-row assistant">
-            <div className="avatar">B</div>
-            <div className="bubble">Думаю...</div>
-          </article>
-        ) : null}
-        <div ref={endRef} />
-      </section>
-
-      <div className={`composer-wrap ${hasMessages ? "" : "empty"}`}>
-        {isRecording ? (
-          <div className="recording-pill">
-            <span className="recording-dot" />
-            <span>Идёт запись</span>
-            <div className="recording-bars" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-              <span />
-            </div>
-          </div>
-        ) : null}
-        {attachments.length > 0 ? (
-          <div className="attachments" aria-live="polite">
-            {attachments.map((attachment, index) => (
-              <div
-                className={`attachment-card ${attachment.status}`}
-                key={`${attachment.name}-${index}`}
-              >
-                <div className="attachment-file-icon">
-                  <FileText size={18} />
-                </div>
-                <div className="attachment-meta">
-                  <div className="attachment-name">{attachment.name}</div>
-                  <div className="attachment-status">
-                    {statusText(attachment)}
-                    {attachment.status !== "uploading" ? ` · ${formatFileSize(attachment.size)}` : ""}
-                  </div>
-                </div>
-                <div className="attachment-indicator" aria-hidden="true">
-                  {attachment.status === "uploading" ? <Loader2 className="spin" size={18} /> : null}
-                  {attachment.status === "ready" ? <Check size={18} /> : null}
-                  {attachment.status === "error" ? <X size={18} /> : null}
-                </div>
-                <button
-                  aria-label="Убрать файл"
-                  className="attachment-remove"
-                  onClick={() =>
-                    setAttachments((current) =>
-                      current.filter((_, currentIndex) => currentIndex !== index)
-                    )
+              <span>{conversation.title || "Новый чат"}</span>
+            </button>
+          ))}
+        </nav>
+        {search.trim() && searchResults.length > 0 ? (
+          <div className="search-results">
+            <div className="sidebar-section-title">Найдено</div>
+            {searchResults.slice(0, 12).map((result) => (
+              <button
+                className="search-result"
+                key={`${result.type}-${result.id}`}
+                onClick={() => {
+                  if (result.conversationId) {
+                    setActiveConversationId(result.conversationId);
+                    void loadMessages(result.conversationId);
                   }
-                  title="Убрать файл"
-                  type="button"
-                >
-                  <X size={14} />
-                </button>
-              </div>
+                }}
+                type="button"
+              >
+                <strong>{result.title}</strong>
+                <span>{result.snippet}</span>
+              </button>
             ))}
           </div>
         ) : null}
-        <form className="composer" onSubmit={onSubmit}>
-          <input
-            ref={fileInputRef}
-            className="file-input"
-            multiple
-            onChange={(event) => void onFilesSelected(event.target.files)}
-            type="file"
-          />
+      </aside>
+
+      {sidebarOpen ? (
+        <button
+          aria-label="Закрыть историю"
+          className="sidebar-backdrop"
+          onClick={() => setSidebarOpen(false)}
+          type="button"
+        />
+      ) : null}
+
+      <section className={`chat-shell ${hasMessages ? "with-messages" : "empty"}`}>
+        <header className="top-bar">
           <button
-            aria-label={isRecording ? "Отменить запись" : "Добавить файл"}
-            className="icon-button"
-            disabled={isLoading}
-            onClick={() =>
-              isRecording ? stopRecording("cancel") : fileInputRef.current?.click()
-            }
-            title={isRecording ? "Отменить запись" : "Добавить файл"}
+            aria-label="История"
+            className="mobile-menu-button"
+            onClick={() => setSidebarOpen(true)}
             type="button"
           >
-            {isRecording ? <Square size={20} /> : <Paperclip size={20} />}
+            <Menu size={20} />
           </button>
-          <button
-            aria-label={isRecording ? "Запись идёт" : "Начать запись"}
-            className={`icon-button ${isRecording ? "recording" : ""}`}
-            disabled={isLoading || isRecording}
-            onClick={startRecording}
-            title={isRecording ? "Запись идёт" : "Микрофон"}
-            type="button"
-          >
-            <Mic size={20} />
-          </button>
-          <textarea
-            aria-label="Сообщение"
-            disabled={isLoading || isRecording}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void sendMessage(input);
+          <div className="brand">
+            <div className="brand-mark">B</div>
+            <div className="brand-title">
+              <strong>Второй мозг</strong>
+              <span>ChatGPT-like с личной памятью</span>
+            </div>
+          </div>
+          <div className="status">{note}</div>
+        </header>
+
+        <section className={`messages ${hasMessages ? "" : "empty"}`} aria-live="polite">
+          {!hasMessages ? (
+            <div className="empty-state">
+              <div>
+                <h1>Рад тебя видеть, Антон.</h1>
+              </div>
+            </div>
+          ) : (
+            messages.map((message, index) => (
+              <article
+                className={`message-row ${message.role}`}
+                key={`${message.role}-${index}`}
+              >
+                {message.role === "assistant" ? <div className="avatar">B</div> : null}
+                <div className="bubble">
+                  {message.content}
+                  {message.imageUrl ? (
+                    <img className="generated-image" src={message.imageUrl} alt="Generated result" />
+                  ) : null}
+                </div>
+              </article>
+            ))
+          )}
+          {showThinking ? (
+            <article className="message-row assistant">
+              <div className="avatar">B</div>
+              <div className="bubble">Думаю...</div>
+            </article>
+          ) : null}
+          <div ref={endRef} />
+        </section>
+
+        <div className={`composer-wrap ${hasMessages ? "" : "empty"}`}>
+          {isRecording ? (
+            <div className="recording-pill">
+              <span className="recording-dot" />
+              <span>Идёт запись</span>
+              <div className="recording-bars" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+                <span />
+              </div>
+            </div>
+          ) : null}
+          {attachments.length > 0 ? (
+            <div className="attachments" aria-live="polite">
+              {attachments.map((attachment, index) => (
+                <div
+                  className={`attachment-card ${attachment.status}`}
+                  key={`${attachment.name}-${index}`}
+                >
+                  <div className="attachment-file-icon">
+                    <FileText size={18} />
+                  </div>
+                  <div className="attachment-meta">
+                    <div className="attachment-name">{attachment.name}</div>
+                    <div className="attachment-status">
+                      {statusText(attachment)}
+                      {attachment.status !== "uploading"
+                        ? ` · ${formatFileSize(attachment.size)}`
+                        : ""}
+                    </div>
+                  </div>
+                  <div className="attachment-indicator" aria-hidden="true">
+                    {attachment.status === "uploading" ? <Loader2 className="spin" size={18} /> : null}
+                    {attachment.status === "ready" ? <Check size={18} /> : null}
+                    {attachment.status === "error" ? <X size={18} /> : null}
+                  </div>
+                  <button
+                    aria-label="Убрать файл"
+                    className="attachment-remove"
+                    onClick={() =>
+                      setAttachments((current) =>
+                        current.filter((_, currentIndex) => currentIndex !== index)
+                      )
+                    }
+                    title="Убрать файл"
+                    type="button"
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          <form className="composer" onSubmit={onSubmit}>
+            <input
+              ref={fileInputRef}
+              className="file-input"
+              multiple
+              onChange={(event) => void onFilesSelected(event.target.files)}
+              type="file"
+            />
+            <button
+              aria-label={isRecording ? "Отменить запись" : "Добавить файл"}
+              className="icon-button"
+              disabled={isLoading}
+              onClick={() =>
+                isRecording ? stopRecording("cancel") : fileInputRef.current?.click()
               }
-            }}
-            placeholder="Спросите что-нибудь..."
-            rows={1}
-            value={input}
-          />
-          <button
-            aria-label={isRecording ? "Отправить запись" : "Отправить"}
-            className="icon-button primary"
-            disabled={isLoading || (!isRecording && !input.trim() && attachments.length === 0)}
-            title={isRecording ? "Отправить запись" : "Отправить"}
-            type="submit"
-          >
-            {isLoading ? <Loader2 className="spin" size={20} /> : <Send size={20} />}
-          </button>
-        </form>
-        {hasMessages ? <div className="composer-note">{note}</div> : null}
-      </div>
+              title={isRecording ? "Отменить запись" : "Добавить файл"}
+              type="button"
+            >
+              {isRecording ? <Square size={20} /> : <Paperclip size={20} />}
+            </button>
+            <button
+              aria-label={isRecording ? "Запись идёт" : "Начать запись"}
+              className={`icon-button ${isRecording ? "recording" : ""}`}
+              disabled={isLoading || isRecording}
+              onClick={startRecording}
+              title={isRecording ? "Запись идёт" : "Микрофон"}
+              type="button"
+            >
+              <Mic size={20} />
+            </button>
+            <textarea
+              aria-label="Сообщение"
+              disabled={isLoading || isRecording}
+              onChange={(event) => setInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void sendMessage(input);
+                }
+              }}
+              placeholder="Спросите что-нибудь..."
+              rows={1}
+              value={input}
+            />
+            <button
+              aria-label={isRecording ? "Отправить запись" : "Отправить"}
+              className="icon-button primary"
+              disabled={isLoading || (!isRecording && !input.trim() && attachments.length === 0)}
+              title={isRecording ? "Отправить запись" : "Отправить"}
+              type="submit"
+            >
+              {isLoading ? <Loader2 className="spin" size={20} /> : <Send size={20} />}
+            </button>
+          </form>
+          {hasMessages ? <div className="composer-note">{note}</div> : null}
+        </div>
+      </section>
     </main>
   );
 }

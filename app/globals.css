@@ -1,6 +1,7 @@
 :root {
   color-scheme: dark;
   --bg: #000000;
+  --sidebar: #111111;
   --panel: #202020;
   --panel-strong: #2a2a2a;
   --text: #f5f5f5;
@@ -28,7 +29,8 @@ body {
 }
 
 button,
-textarea {
+textarea,
+input {
   font: inherit;
 }
 
@@ -39,15 +41,139 @@ button {
 .app-shell {
   min-height: 100dvh;
   display: grid;
-  grid-template-rows: auto 1fr auto;
+  grid-template-columns: 280px 1fr;
   background: var(--bg);
 }
 
-.app-shell.empty {
+.sidebar {
+  min-height: 100dvh;
+  padding: 12px;
+  border-right: 1px solid #1f1f1f;
+  background: var(--sidebar);
+  overflow-y: auto;
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.new-chat-button {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px;
+  color: var(--text);
+  background: #191919;
+  cursor: pointer;
+}
+
+.new-chat-button:hover,
+.conversation-item:hover,
+.search-result:hover {
+  background: #242424;
+}
+
+.sidebar-close {
+  display: none;
+}
+
+.search-box {
+  min-height: 40px;
+  margin-bottom: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  color: var(--muted);
+  background: #171717;
+}
+
+.search-box input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  color: var(--text);
+  background: transparent;
+}
+
+.search-box input::placeholder {
+  color: var(--muted);
+}
+
+.conversation-list,
+.search-results {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.conversation-item,
+.search-result {
+  width: 100%;
+  border: 0;
+  border-radius: 9px;
+  padding: 10px;
+  color: var(--text);
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.conversation-item span,
+.search-result strong,
+.search-result span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-item {
+  font-size: 14px;
+}
+
+.conversation-item.active {
+  background: #2a2a2a;
+}
+
+.sidebar-section-title {
+  margin: 14px 6px 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.search-result strong {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.search-result span {
+  margin-top: 3px;
+  font-size: 13px;
+}
+
+.chat-shell {
+  position: relative;
+  min-width: 0;
+  min-height: 100dvh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+}
+
+.chat-shell.empty {
   grid-template-rows: 1fr;
 }
 
-.app-shell.empty .top-bar {
+.chat-shell.empty .top-bar {
   display: none;
 }
 
@@ -64,6 +190,10 @@ button {
   border-bottom: 1px solid transparent;
   background: rgba(0, 0, 0, 0.72);
   backdrop-filter: blur(16px);
+}
+
+.mobile-menu-button {
+  display: none;
 }
 
 .brand {
@@ -132,13 +262,6 @@ button {
   letter-spacing: 0;
 }
 
-.empty-state p {
-  max-width: 520px;
-  margin: 0;
-  font-size: 16px;
-  line-height: 1.55;
-}
-
 .message-row {
   display: flex;
   gap: 12px;
@@ -187,7 +310,7 @@ button {
 
 .composer-wrap {
   position: fixed;
-  left: 0;
+  left: 280px;
   right: 0;
   bottom: 0;
   z-index: 10;
@@ -204,7 +327,7 @@ button {
 }
 
 .composer {
-  width: min(760px, calc(100vw - 32px));
+  width: min(760px, calc(100vw - 320px));
   margin: 0 auto;
   display: grid;
   grid-template-columns: auto auto 1fr auto;
@@ -238,7 +361,9 @@ button {
   color: #9a9a9a;
 }
 
-.icon-button {
+.icon-button,
+.mobile-menu-button,
+.sidebar-close {
   width: 44px;
   height: 44px;
   border: 0;
@@ -250,7 +375,9 @@ button {
   cursor: pointer;
 }
 
-.icon-button:hover {
+.icon-button:hover,
+.mobile-menu-button:hover,
+.sidebar-close:hover {
   background: #343434;
 }
 
@@ -294,7 +421,7 @@ button {
 
 .recording-pill,
 .attachments {
-  width: min(760px, calc(100vw - 32px));
+  width: min(760px, calc(100vw - 320px));
   margin: 0 auto 8px;
 }
 
@@ -470,7 +597,37 @@ button {
   }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 800px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    z-index: 30;
+    width: min(320px, 86vw);
+    transform: translateX(-100%);
+    transition: transform 0.18s ease;
+  }
+
+  .sidebar-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 25;
+    border: 0;
+    background: rgba(0, 0, 0, 0.52);
+  }
+
+  .sidebar-close,
+  .mobile-menu-button {
+    display: grid;
+  }
+
   .top-bar {
     min-height: 58px;
     padding-inline: 12px;
@@ -486,5 +643,15 @@ button {
 
   .bubble {
     max-width: 82vw;
+  }
+
+  .composer-wrap {
+    left: 0;
+  }
+
+  .composer,
+  .recording-pill,
+  .attachments {
+    width: min(760px, calc(100vw - 32px));
   }
 }

@@ -1,4 +1,9 @@
 import { NextResponse } from "next/server";
+import {
+  getShortTermContext,
+  maybeGenerateConversationTitle,
+  touchConversation
+} from "@/lib/conversations";
 import { chatModel, getOpenAI } from "@/lib/openai";
 import {
   getDocumentsForPrompt,
@@ -18,9 +23,10 @@ export const maxDuration = 60;
 
 export async function POST(request: Request) {
   try {
-    const { message, documentIds } = (await request.json()) as {
+    const { message, documentIds, conversationId } = (await request.json()) as {
       message?: string;
       documentIds?: Array<string | number>;
+      conversationId?: string | number;
     };
     const userMessage = message?.trim();
     const attachedDocumentIds = documentIds ?? [];
@@ -29,13 +35,20 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Message is required." }, { status: 400 });
     }
 
-    const memory = await retrieveMemory(userMessage);
+    const [memory, documentsPrompt, imageInputs, shortTermMessages] = await Promise.all([
+      retrieveMemory(userMessage),
+      getDocumentsForPrompt(attachedDocumentIds),
+      getImageInputsForVision(attachedDocumentIds),
+      getShortTermContext(conversationId)
+    ]);
     const memoryPrompt = formatMemoryForPrompt(memory);
-    const documentsPrompt = await getDocumentsForPrompt(attachedDocumentIds);
-    const imageInputs = await getImageInputsForVision(attachedDocumentIds);
-    const userMessageId = await saveMessage("user", userMessage, {
-      document_ids: attachedDocumentIds
-    });
+    const userMessageId = await saveMessage(
+      "user",
+      userMessage,
+      { document_ids: attachedDocumentIds },
+      conversationId
+    );
+    await touchConversation(conversationId);
     await linkDocumentsToMessage({
       messageId: userMessageId,
       documentIds: attachedDocumentIds,
@@ -75,7 +88,7 @@ export async function POST(request: Request) {
         },
         {
           role: "system",
-          content: `Private context about Anton. Use silently.\n${memoryPrompt}`
+          content: `Private long-term context about Anton. Use silently.\n${memoryPrompt}`
         },
         ...(documentsPrompt
           ? [
@@ -85,6 +98,7 @@ export async function POST(request: Request) {
               }
             ]
           : []),
+        ...shortTermMessages,
         { role: "user", content: userContent }
       ]
     });
@@ -104,16 +118,27 @@ export async function POST(request: Request) {
 
           const finalAnswer = answer.trim();
           if (finalAnswer) {
-            const assistantMessageId = await saveMessage("assistant", finalAnswer, {
-              reply_to_message_id: userMessageId,
-              document_ids: attachedDocumentIds
-            });
+            const assistantMessageId = await saveMessage(
+              "assistant",
+              finalAnswer,
+              {
+                reply_to_message_id: userMessageId,
+                document_ids: attachedDocumentIds
+              },
+              conversationId
+            );
             await linkDocumentsToMessage({
               messageId: assistantMessageId,
               documentIds: attachedDocumentIds,
               relationType: "used_in_answer"
             });
+            await maybeGenerateConversationTitle({
+              conversationId,
+              userMessage,
+              assistantAnswer: finalAnswer
+            });
             await extractAndSaveMemory(userMessage, finalAnswer, userMessageId);
+            await touchConversation(conversationId);
           }
         } catch (error) {
           const message =

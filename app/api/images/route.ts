@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { toFile } from "openai";
+import { touchConversation } from "@/lib/conversations";
 import {
   getImageFilesForEdit,
   linkDocumentsToMessage,
@@ -13,9 +14,10 @@ export const maxDuration = 60;
 
 export async function POST(request: Request) {
   try {
-    const { prompt, documentIds } = (await request.json()) as {
+    const { prompt, documentIds, conversationId } = (await request.json()) as {
       prompt?: string;
       documentIds?: Array<string | number>;
+      conversationId?: string | number;
     };
     const imagePrompt = prompt?.trim();
     const sourceDocumentIds = documentIds ?? [];
@@ -24,10 +26,16 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Prompt is required." }, { status: 400 });
     }
 
-    const userMessageId = await saveMessage("user", imagePrompt, {
-      document_ids: sourceDocumentIds,
-      intent: "image"
-    });
+    const userMessageId = await saveMessage(
+      "user",
+      imagePrompt,
+      {
+        document_ids: sourceDocumentIds,
+        intent: "image"
+      },
+      conversationId
+    );
+    await touchConversation(conversationId);
     await linkDocumentsToMessage({
       messageId: userMessageId,
       documentIds: sourceDocumentIds,
@@ -66,12 +74,18 @@ export async function POST(request: Request) {
     const imageUrl = `data:image/png;base64,${imageBytes.toString("base64")}`;
     const answer = "Готово.";
 
-    const assistantMessageId = await saveMessage("assistant", answer, {
-      reply_to_message_id: userMessageId,
-      generated_document_id: document.id,
-      source_document_ids: sourceDocumentIds,
-      intent: inputImages.length > 0 ? "image_edit" : "image_generation"
-    });
+    const assistantMessageId = await saveMessage(
+      "assistant",
+      answer,
+      {
+        reply_to_message_id: userMessageId,
+        generated_document_id: document.id,
+        source_document_ids: sourceDocumentIds,
+        intent: inputImages.length > 0 ? "image_edit" : "image_generation"
+      },
+      conversationId
+    );
+    await touchConversation(conversationId);
     await linkDocumentsToMessage({
       messageId: assistantMessageId,
       documentIds: [document.id],

@@ -131,16 +131,19 @@ function rankRecords(
 export async function saveMessage(
   role: "user" | "assistant",
   content: string,
-  metadata: Record<string, unknown> = {}
+  metadata: Record<string, unknown> = {},
+  conversationId?: string | number
 ) {
   const supabase = getSupabase();
+  const payload: Record<string, unknown> = { role, content, metadata };
+  if (conversationId) payload.conversation_id = conversationId;
   let { data, error } = await supabase
     .from("messages")
-    .insert({ role, content, metadata })
+    .insert(payload)
     .select("id")
     .single();
 
-  if (error && error.message.toLowerCase().includes("metadata")) {
+  if (error && /metadata|conversation_id/i.test(error.message)) {
     const fallback = await supabase
       .from("messages")
       .insert({ role, content })
