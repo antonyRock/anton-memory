@@ -36,6 +36,7 @@ export async function listConversations(search = "") {
       return { conversations: [LEGACY_CONVERSATION], results: [] };
     }
     if (error) throw new Error(`Could not load conversations: ${error.message}`);
+
     return {
       conversations: (data ?? []) as Conversation[],
       results: []
@@ -53,13 +54,13 @@ export async function listConversations(search = "") {
         .limit(20),
       supabase
         .from("messages")
-        .select("conversation_id, content, created_at")
+        .select("id, conversation_id, content, created_at")
         .ilike("content", pattern)
         .order("created_at", { ascending: false })
         .limit(20),
       supabase
         .from("documents")
-        .select("id, file_name, extracted_text, created_at")
+        .select("id, file_name, extracted_text, summary, created_at")
         .or(`file_name.ilike.${pattern},extracted_text.ilike.${pattern},summary.ilike.${pattern}`)
         .order("created_at", { ascending: false })
         .limit(10),
@@ -96,6 +97,13 @@ export async function listConversations(search = "") {
     };
   }
 
+  if (conversationMatches.error) {
+    throw new Error(`Could not search conversations: ${conversationMatches.error.message}`);
+  }
+
+  const documentConversationIds = await getConversationIdsForDocuments(
+    (documentMatches.data ?? []).map((document) => document.id as string | number)
+  );
   const conversationIds = new Set<string | number>();
   const conversations: Conversation[] = [];
 
@@ -106,6 +114,10 @@ export async function listConversations(search = "") {
 
   for (const message of messageMatches.data ?? []) {
     if (message.conversation_id) conversationIds.add(message.conversation_id);
+  }
+
+  for (const conversationId of documentConversationIds.values()) {
+    if (conversationId) conversationIds.add(conversationId);
   }
 
   const missingIds = [...conversationIds].filter(
@@ -126,8 +138,15 @@ export async function listConversations(search = "") {
       .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
       .slice(0, 40),
     results: [
+      ...toResults("conversation", conversationMatches.data, "summary", "title"),
       ...toResults("message", messageMatches.data, "content"),
-      ...toResults("document", documentMatches.data, "extracted_text", "file_name"),
+      ...toResults(
+        "document",
+        documentMatches.data,
+        "extracted_text",
+        "file_name",
+        documentConversationIds
+      ),
       ...toResults("fact", factMatches.data, "content", "fact"),
       ...toResults("entity", entityMatches.data, "description", "name"),
       ...toResults("task", taskMatches.data, "description", "title")
@@ -254,13 +273,58 @@ function toResults(
   type: string,
   rows: Record<string, unknown>[] | null,
   textKey: string,
-  fallbackKey?: string
+  fallbackKey?: string,
+  conversationIdsByRowId?: Map<string, string | number | null>
 ) {
   return (rows ?? []).map((row) => ({
     type,
     id: row.id ?? row.conversation_id ?? crypto.randomUUID(),
-    conversationId: row.conversation_id ?? null,
-    title: fallbackKey ? String(row[fallbackKey] ?? type) : type,
+    conversationId:
+      row.conversation_id ??
+      conversationIdsByRowId?.get(String(row.id ?? "")) ??
+      (type === "conversation" ? row.id : null),
+    title: fallbackKey ? String(row[fallbackKey] ?? type) : resultTypeLabel(type),
     snippet: String(row[textKey] ?? row[fallbackKey ?? ""] ?? "").slice(0, 180)
   }));
+}
+
+async function getConversationIdsForDocuments(documentIds: Array<string | number>) {
+  const result = new Map<string, string | number | null>();
+  if (documentIds.length === 0) return result;
+
+  const supabase = getSupabase();
+  const links = await supabase
+    .from("message_documents")
+    .select("document_id, message_id")
+    .in("document_id", documentIds);
+
+  if (links.error || !links.data?.length) return result;
+
+  const messageIds = [...new Set(links.data.map((link) => link.message_id))];
+  const messages = await supabase
+    .from("messages")
+    .select("id, conversation_id")
+    .in("id", messageIds);
+
+  if (messages.error || !messages.data?.length) return result;
+
+  const conversationByMessageId = new Map(
+    messages.data.map((message) => [String(message.id), message.conversation_id ?? null])
+  );
+
+  for (const link of links.data) {
+    const conversationId = conversationByMessageId.get(String(link.message_id)) ?? null;
+    if (conversationId) result.set(String(link.document_id), conversationId);
+  }
+
+  return result;
+}
+
+function resultTypeLabel(type: string) {
+  if (type === "message") return "Сообщение";
+  if (type === "document") return "Файл";
+  if (type === "fact") return "Факт";
+  if (type === "entity") return "Сущность";
+  if (type === "task") return "Задача";
+  return "Чат";
 }

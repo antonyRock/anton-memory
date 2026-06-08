@@ -9,10 +9,13 @@ import {
   Loader2,
   Menu,
   Mic,
+  PanelLeftClose,
+  PanelLeftOpen,
   Paperclip,
   Plus,
   Search,
   Send,
+  Settings,
   Square,
   X
 } from "lucide-react";
@@ -59,7 +62,9 @@ export default function Home() {
   const [activeConversationId, setActiveConversationId] = useState<string | number | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [search, setSearch] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -71,46 +76,54 @@ export default function Home() {
   const recordingActionRef = useRef<"send" | "cancel">("send");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
+  const shouldAutoScrollRef = useRef(false);
   const hasMessages = messages.length > 0;
   const showThinking = isLoading && messages[messages.length - 1]?.role !== "assistant";
 
   useEffect(() => {
     navigator.serviceWorker?.register("/sw.js").catch(() => undefined);
+    setSidebarCollapsed(window.localStorage.getItem("sidebarCollapsed") === "true");
     void bootstrap();
   }, []);
 
   useEffect(() => {
     const handle = window.setTimeout(() => {
-      void loadConversations(search, false);
+      void loadConversations(search, true);
     }, 250);
     return () => window.clearTimeout(handle);
   }, [search]);
 
   useEffect(() => {
+    if (!shouldAutoScrollRef.current) return;
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
+  useEffect(() => {
+    window.localStorage.setItem("sidebarCollapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
   async function bootstrap() {
-    const loaded = await loadConversations("", false);
-    const first = loaded[0];
-    if (first) {
-      setActiveConversationId(first.id);
-      await loadMessages(first.id);
-    } else {
-      await newChat();
+    const loaded = await loadConversations("", true);
+    const savedConversationId = window.localStorage.getItem("activeConversationId");
+    const restored =
+      loaded.find((conversation) => String(conversation.id) === savedConversationId) ?? loaded[0];
+
+    if (restored) {
+      setActiveConversationId(restored.id);
+      await loadMessages(restored.id);
+      return;
     }
+
+    await newChat();
   }
 
-  async function loadConversations(query = search, keepSelection = true) {
+  async function loadConversations(query = search, _keepSelection = true) {
     try {
       const response = await fetch(`/api/conversations?search=${encodeURIComponent(query)}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить историю");
       setConversations(data.conversations ?? []);
       setSearchResults(data.results ?? []);
-      if (!keepSelection && data.conversations?.[0]) {
-        setActiveConversationId(data.conversations[0].id);
-      }
       return (data.conversations ?? []) as Conversation[];
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Не удалось загрузить историю");
@@ -120,6 +133,7 @@ export default function Home() {
 
   async function loadMessages(conversationId: string | number) {
     try {
+      shouldAutoScrollRef.current = false;
       const response = await fetch(`/api/conversations/${conversationId}/messages`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить сообщения");
@@ -136,6 +150,7 @@ export default function Home() {
           })
         )
       );
+      window.localStorage.setItem("activeConversationId", String(conversationId));
       setSidebarOpen(false);
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Не удалось загрузить сообщения");
@@ -148,11 +163,17 @@ export default function Home() {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось создать чат");
       const conversation = data.conversation as Conversation;
-      setConversations((current) => [conversation, ...current]);
+      setConversations((current) => [
+        conversation,
+        ...current.filter((item) => String(item.id) !== String(conversation.id))
+      ]);
       setActiveConversationId(conversation.id);
+      window.localStorage.setItem("activeConversationId", String(conversation.id));
+      shouldAutoScrollRef.current = false;
       setMessages([]);
       setInput("");
       setAttachments([]);
+      setSearch("");
       setSidebarOpen(false);
       setNote("Новый чат");
       return conversation.id;
@@ -160,6 +181,13 @@ export default function Home() {
       setNote(error instanceof Error ? error.message : "Не удалось создать чат");
       return null;
     }
+  }
+
+  function openConversation(conversationId: string | number | null | undefined) {
+    if (!conversationId) return;
+    setActiveConversationId(conversationId);
+    window.localStorage.setItem("activeConversationId", String(conversationId));
+    void loadMessages(conversationId);
   }
 
   async function sendMessage(text: string, files = attachments) {
@@ -181,6 +209,7 @@ export default function Home() {
     const imageIntent =
       shouldGenerateImage(trimmed) || (hasImageAttachment && shouldEditImage(trimmed));
 
+    shouldAutoScrollRef.current = true;
     setMessages((current) => [
       ...current,
       { role: "user", content: displayText, attachments: readyFiles }
@@ -250,27 +279,13 @@ export default function Home() {
       if (done) break;
 
       fullText += decoder.decode(value, { stream: true });
-      setMessages((current) => {
-        const next = [...current];
-        const last = next[next.length - 1];
-        if (last?.role === "assistant") {
-          next[next.length - 1] = { ...last, content: fullText };
-        }
-        return next;
-      });
+      setMessages((current) => replaceLastAssistantMessage(current, fullText));
     }
 
     const trailing = decoder.decode();
     if (trailing) {
       fullText += trailing;
-      setMessages((current) => {
-        const next = [...current];
-        const last = next[next.length - 1];
-        if (last?.role === "assistant") {
-          next[next.length - 1] = { ...last, content: fullText };
-        }
-        return next;
-      });
+      setMessages((current) => replaceLastAssistantMessage(current, fullText));
     }
   }
 
@@ -394,10 +409,7 @@ export default function Home() {
         const next = [...current];
         const start = next.length - pendingAttachments.length;
         data.documents.forEach((document: FileAttachment, index: number) => {
-          next[start + index] = {
-            ...document,
-            status: "ready"
-          };
+          next[start + index] = { ...document, status: "ready" };
         });
         return next;
       });
@@ -416,31 +428,78 @@ export default function Home() {
   }
 
   return (
-    <main className={`app-shell ${sidebarOpen ? "sidebar-open" : ""}`}>
+    <main
+      className={`app-shell ${sidebarOpen ? "sidebar-open" : ""} ${
+        sidebarCollapsed ? "sidebar-collapsed" : ""
+      }`}
+    >
+      {sidebarCollapsed ? (
+        <button
+          aria-label="Показать sidebar"
+          className="sidebar-reopen"
+          onClick={() => setSidebarCollapsed(false)}
+          type="button"
+        >
+          <PanelLeftOpen size={20} />
+        </button>
+      ) : null}
+
       <aside className="sidebar">
         <div className="sidebar-header">
-          <button className="new-chat-button" onClick={() => void newChat()} type="button">
+          <div className="sidebar-brand">Второй мозг</div>
+          <button
+            aria-label="Скрыть sidebar"
+            className="sidebar-close"
+            onClick={() => {
+              if (window.matchMedia("(max-width: 800px)").matches) {
+                setSidebarOpen(false);
+              } else {
+                setSidebarCollapsed(true);
+              }
+            }}
+            type="button"
+          >
+            <PanelLeftClose size={18} />
+          </button>
+        </div>
+
+        <div className="sidebar-actions">
+          <button className="sidebar-action" onClick={() => void newChat()} type="button">
             <Plus size={18} />
             Новый чат
           </button>
           <button
-            aria-label="Закрыть историю"
-            className="sidebar-close"
-            onClick={() => setSidebarOpen(false)}
+            className="sidebar-action"
+            onClick={() => setSearchOpen((current) => !current)}
             type="button"
           >
-            <X size={18} />
+            <Search size={18} />
+            Искать чаты
+          </button>
+          <button className="sidebar-action" type="button">
+            <Paperclip size={18} />
+            Библиотека / Файлы
+          </button>
+          <button className="sidebar-action" type="button">
+            <Settings size={18} />
+            Настройки
           </button>
         </div>
-        <label className="search-box">
-          <Search size={17} />
-          <input
-            aria-label="Поиск"
-            onChange={(event) => setSearch(event.target.value)}
-            placeholder="Поиск"
-            value={search}
-          />
-        </label>
+
+        {searchOpen ? (
+          <label className="search-box">
+            <Search size={17} />
+            <input
+              aria-label="Поиск"
+              autoFocus
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Поиск по чатам и памяти"
+              value={search}
+            />
+          </label>
+        ) : null}
+
+        <div className="sidebar-section-title">Недавние</div>
         <nav className="conversation-list">
           {conversations.map((conversation) => (
             <button
@@ -448,16 +507,14 @@ export default function Home() {
                 String(conversation.id) === String(activeConversationId) ? "active" : ""
               }`}
               key={conversation.id}
-              onClick={() => {
-                setActiveConversationId(conversation.id);
-                void loadMessages(conversation.id);
-              }}
+              onClick={() => openConversation(conversation.id)}
               type="button"
             >
               <span>{conversation.title || "Новый чат"}</span>
             </button>
           ))}
         </nav>
+
         {search.trim() && searchResults.length > 0 ? (
           <div className="search-results">
             <div className="sidebar-section-title">Найдено</div>
@@ -465,12 +522,7 @@ export default function Home() {
               <button
                 className="search-result"
                 key={`${result.type}-${result.id}`}
-                onClick={() => {
-                  if (result.conversationId) {
-                    setActiveConversationId(result.conversationId);
-                    void loadMessages(result.conversationId);
-                  }
-                }}
+                onClick={() => openConversation(result.conversationId)}
                 type="button"
               >
                 <strong>{result.title}</strong>
@@ -660,6 +712,15 @@ export default function Home() {
       ) : null}
     </main>
   );
+}
+
+function replaceLastAssistantMessage(messages: ChatMessage[], content: string) {
+  const next = [...messages];
+  const last = next[next.length - 1];
+  if (last?.role === "assistant") {
+    next[next.length - 1] = { ...last, content };
+  }
+  return next;
 }
 
 function MessageAttachments({
