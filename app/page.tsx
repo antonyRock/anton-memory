@@ -1,7 +1,16 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Loader2, Mic, Paperclip, Send, Square } from "lucide-react";
+import {
+  Check,
+  FileText,
+  Loader2,
+  Mic,
+  Paperclip,
+  Send,
+  Square,
+  X
+} from "lucide-react";
 
 type ChatMessage = {
   role: "user" | "assistant";
@@ -53,7 +62,8 @@ export default function Home() {
     const readyDocumentIds = readyFiles.map((file) => file.id);
     const displayText = trimmed || files.map((file) => file.name).join(", ");
     const hasImageAttachment = readyFiles.some((file) => file.type.startsWith("image/"));
-    const imageIntent = shouldGenerateImage(trimmed) || (hasImageAttachment && shouldEditImage(trimmed));
+    const imageIntent =
+      shouldGenerateImage(trimmed) || (hasImageAttachment && shouldEditImage(trimmed));
 
     setMessages((current) => [...current, { role: "user", content: displayText }]);
     setInput("");
@@ -198,7 +208,7 @@ export default function Home() {
 
     setAttachments((current) => [...current, ...pendingAttachments]);
     if (fileInputRef.current) fileInputRef.current.value = "";
-    setNote("Загружаю файл");
+    setNote(selectedFiles.length > 1 ? "Загружаю файлы" : "Загружаю файл");
 
     const formData = new FormData();
     selectedFiles.forEach((file) => formData.append("files", file));
@@ -239,7 +249,7 @@ export default function Home() {
         );
         return next;
       });
-      setNote("Файл готов");
+      setNote(selectedFiles.length > 1 ? "Файлы готовы" : "Файл готов");
     } catch (error) {
       const message = error instanceof Error ? error.message : "Ошибка загрузки файла";
       setAttachments((current) =>
@@ -279,9 +289,7 @@ export default function Home() {
               className={`message-row ${message.role}`}
               key={`${message.role}-${index}`}
             >
-              {message.role === "assistant" ? (
-                <div className="avatar">B</div>
-              ) : null}
+              {message.role === "assistant" ? <div className="avatar">B</div> : null}
               <div className="bubble">
                 {message.content}
                 {message.imageUrl ? (
@@ -314,23 +322,41 @@ export default function Home() {
           </div>
         ) : null}
         {attachments.length > 0 ? (
-          <div className="attachments">
+          <div className="attachments" aria-live="polite">
             {attachments.map((attachment, index) => (
-              <button
-                className="attachment-chip"
+              <div
+                className={`attachment-card ${attachment.status}`}
                 key={`${attachment.name}-${index}`}
-                onClick={() =>
-                  setAttachments((current) =>
-                    current.filter((_, currentIndex) => currentIndex !== index)
-                  )
-                }
-                title="Убрать файл"
-                type="button"
               >
-                {attachment.name}
-                {attachment.status === "uploading" ? "..." : ""}
-                {attachment.status === "error" ? " !" : ""}
-              </button>
+                <div className="attachment-file-icon">
+                  <FileText size={18} />
+                </div>
+                <div className="attachment-meta">
+                  <div className="attachment-name">{attachment.name}</div>
+                  <div className="attachment-status">
+                    {statusText(attachment)}
+                    {attachment.status !== "uploading" ? ` · ${formatFileSize(attachment.size)}` : ""}
+                  </div>
+                </div>
+                <div className="attachment-indicator" aria-hidden="true">
+                  {attachment.status === "uploading" ? <Loader2 className="spin" size={18} /> : null}
+                  {attachment.status === "ready" ? <Check size={18} /> : null}
+                  {attachment.status === "error" ? <X size={18} /> : null}
+                </div>
+                <button
+                  aria-label="Убрать файл"
+                  className="attachment-remove"
+                  onClick={() =>
+                    setAttachments((current) =>
+                      current.filter((_, currentIndex) => currentIndex !== index)
+                    )
+                  }
+                  title="Убрать файл"
+                  type="button"
+                >
+                  <X size={14} />
+                </button>
+              </div>
             ))}
           </div>
         ) : null}
@@ -385,17 +411,25 @@ export default function Home() {
             title={isRecording ? "Отправить запись" : "Отправить"}
             type="submit"
           >
-            {isLoading ? (
-              <Loader2 className="spin" size={20} />
-            ) : (
-              <Send size={20} />
-            )}
+            {isLoading ? <Loader2 className="spin" size={20} /> : <Send size={20} />}
           </button>
         </form>
         {hasMessages ? <div className="composer-note">{note}</div> : null}
       </div>
     </main>
   );
+}
+
+function statusText(attachment: Attachment) {
+  if (attachment.status === "uploading") return "Загрузка...";
+  if (attachment.status === "ready") return "Файл загружен";
+  return attachment.error ?? "Ошибка загрузки";
+}
+
+function formatFileSize(size: number) {
+  if (size < 1024) return `${size} Б`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} КБ`;
+  return `${(size / 1024 / 1024).toFixed(1)} МБ`;
 }
 
 function shouldGenerateImage(message: string) {

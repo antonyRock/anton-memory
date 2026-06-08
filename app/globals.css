@@ -346,20 +346,99 @@ button {
 .attachments {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
 }
 
-.attachment-chip {
-  max-width: min(260px, 70vw);
-  padding: 7px 10px;
+.attachment-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: min(320px, 100%);
+  min-height: 56px;
+  padding: 8px 8px 8px 10px;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  overflow: hidden;
+  border-radius: 12px;
   color: var(--text);
   background: #171717;
+}
+
+.attachment-card.ready {
+  border-color: rgba(16, 162, 95, 0.45);
+}
+
+.attachment-card.error {
+  border-color: rgba(180, 35, 24, 0.62);
+}
+
+.attachment-file-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  background: #2b2b2b;
+  color: #d6d6d6;
+}
+
+.attachment-meta {
+  min-width: 0;
+}
+
+.attachment-name {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.attachment-status {
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-card.ready .attachment-status,
+.attachment-card.ready .attachment-indicator {
+  color: var(--accent);
+}
+
+.attachment-card.error .attachment-status,
+.attachment-card.error .attachment-indicator {
+  color: #ff8a7a;
+}
+
+.attachment-indicator {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.attachment-remove {
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: transparent;
   cursor: pointer;
+}
+
+.attachment-remove:hover {
+  color: var(--text);
+  background: #2a2a2a;
 }
 
 .generated-image {

@@ -115,12 +115,13 @@ alter table public.message_documents add column if not exists metadata jsonb def
 
 create or replace function public.set_updated_at()
 returns trigger
+language plpgsql
 as $$
 begin
   new.updated_at = now();
   return new;
 end;
-$$ language plpgsql;
+$$;
 
 drop trigger if exists facts_set_updated_at on public.facts;
 create trigger facts_set_updated_at
