@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
   Check,
   FileSpreadsheet,
@@ -78,6 +78,7 @@ export default function Home() {
   const messagesRef = useRef<HTMLElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
+  const pendingResetScrollRef = useRef(false);
   const hasMessages = messages.length > 0;
   const showThinking = isLoading && messages[messages.length - 1]?.role !== "assistant";
 
@@ -98,6 +99,12 @@ export default function Home() {
     if (!shouldAutoScrollRef.current) return;
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
+
+  useLayoutEffect(() => {
+    if (!pendingResetScrollRef.current) return;
+    resetMessagesScroll();
+    pendingResetScrollRef.current = false;
+  }, [messages, activeConversationId]);
 
   useEffect(() => {
     window.localStorage.setItem("sidebarCollapsed", String(sidebarCollapsed));
@@ -135,6 +142,8 @@ export default function Home() {
   async function loadMessages(conversationId: string | number) {
     try {
       shouldAutoScrollRef.current = false;
+      pendingResetScrollRef.current = true;
+      resetMessagesScroll();
       const response = await fetch(`/api/conversations/${conversationId}/messages`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить сообщения");
@@ -151,9 +160,6 @@ export default function Home() {
           })
         )
       );
-      window.requestAnimationFrame(() => {
-        if (messagesRef.current) messagesRef.current.scrollTop = 0;
-      });
       window.localStorage.setItem("activeConversationId", String(conversationId));
       setSidebarOpen(false);
     } catch (error) {
@@ -189,9 +195,19 @@ export default function Home() {
 
   function openConversation(conversationId: string | number | null | undefined) {
     if (!conversationId) return;
+    shouldAutoScrollRef.current = false;
+    pendingResetScrollRef.current = true;
+    resetMessagesScroll();
     setActiveConversationId(conversationId);
     window.localStorage.setItem("activeConversationId", String(conversationId));
     void loadMessages(conversationId);
+  }
+
+  function resetMessagesScroll() {
+    if (messagesRef.current) messagesRef.current.scrollTop = 0;
+    window.scrollTo({ top: 0, behavior: "instant" });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
   }
 
   async function sendMessage(text: string, files = attachments) {
@@ -568,6 +584,7 @@ export default function Home() {
 
         <section
           className={`messages ${hasMessages ? "" : "empty"}`}
+          key={String(activeConversationId ?? "no-conversation")}
           ref={messagesRef}
           aria-live="polite"
         >
