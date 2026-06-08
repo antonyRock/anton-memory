@@ -12,18 +12,25 @@ export type StoredDocument = {
   metadata: Record<string, unknown>;
 };
 
+export type StoredImageFile = {
+  fileName: string;
+  fileType: string;
+  buffer: Buffer;
+};
+
+const DOCUMENTS_BUCKET = "documents";
 const MAX_EXTRACTED_TEXT = 80_000;
 const MAX_ROWS_PER_SHEET = 200;
 
 export async function processAndStoreFile(file: File): Promise<StoredDocument> {
   const bytes = Buffer.from(await file.arrayBuffer());
-  const storagePath = `${Date.now()}-${sanitizeFileName(file.name)}`;
+  const storagePath = `uploads/${Date.now()}-${sanitizeFileName(file.name)}`;
   const extracted = await extractFileText(file, bytes);
   const summary = summarizeExtractedText(extracted.text);
   const supabase = getSupabase();
 
   const { error: uploadError } = await supabase.storage
-    .from("documents")
+    .from(DOCUMENTS_BUCKET)
     .upload(storagePath, bytes, {
       contentType: file.type || "application/octet-stream",
       upsert: false
@@ -54,6 +61,115 @@ export async function processAndStoreFile(file: File): Promise<StoredDocument> {
   return data as StoredDocument;
 }
 
+export async function storeGeneratedImage(input: {
+  prompt: string;
+  imageBytes: Buffer;
+  sourceDocumentIds?: Array<string | number>;
+}) {
+  const storagePath = `generated/${Date.now()}-${randomId()}.png`;
+  const supabase = getSupabase();
+
+  const { error: uploadError } = await supabase.storage
+    .from(DOCUMENTS_BUCKET)
+    .upload(storagePath, input.imageBytes, {
+      contentType: "image/png",
+      upsert: false
+    });
+
+  if (uploadError) {
+    throw new Error(`Could not upload generated image: ${uploadError.message}`);
+  }
+
+  const summary = `Generated image for prompt: ${input.prompt.slice(0, 500)}`;
+  const { data, error } = await supabase
+    .from("documents")
+    .insert({
+      file_name: `generated-${Date.now()}.png`,
+      file_type: "image/png",
+      file_size: input.imageBytes.length,
+      storage_path: storagePath,
+      extracted_text: summary,
+      summary,
+      metadata: {
+        kind: "generated_image",
+        prompt: input.prompt,
+        source_document_ids: input.sourceDocumentIds ?? []
+      }
+    })
+    .select("*")
+    .single();
+
+  if (error) {
+    throw new Error(`Could not save generated image metadata: ${error.message}`);
+  }
+
+  return data as StoredDocument;
+}
+
+export async function storeAudioFile(input: {
+  file: File;
+  transcript?: string;
+}) {
+  const bytes = Buffer.from(await input.file.arrayBuffer());
+  const storagePath = `audio/${Date.now()}-${sanitizeFileName(input.file.name)}`;
+  const supabase = getSupabase();
+
+  const { error: uploadError } = await supabase.storage
+    .from(DOCUMENTS_BUCKET)
+    .upload(storagePath, bytes, {
+      contentType: input.file.type || "audio/webm",
+      upsert: false
+    });
+
+  if (uploadError) {
+    throw new Error(`Could not upload audio file: ${uploadError.message}`);
+  }
+
+  const { data, error } = await supabase
+    .from("documents")
+    .insert({
+      file_name: input.file.name,
+      file_type: input.file.type || "audio/webm",
+      file_size: input.file.size,
+      storage_path: storagePath,
+      extracted_text: input.transcript ?? "",
+      summary: input.transcript ? `Voice transcript: ${input.transcript.slice(0, 500)}` : null,
+      metadata: {
+        kind: "audio",
+        has_transcript: Boolean(input.transcript)
+      }
+    })
+    .select("*")
+    .single();
+
+  if (error) {
+    throw new Error(`Could not save audio metadata: ${error.message}`);
+  }
+
+  return data as StoredDocument;
+}
+
+export async function linkDocumentsToMessage(input: {
+  messageId?: string | number;
+  documentIds: Array<string | number>;
+  relationType?: string;
+}) {
+  if (!input.messageId || input.documentIds.length === 0) return;
+
+  const supabase = getSupabase();
+  const { error } = await supabase.from("message_documents").insert(
+    input.documentIds.map((documentId) => ({
+      message_id: Number(input.messageId),
+      document_id: Number(documentId),
+      relation_type: input.relationType ?? "attachment"
+    }))
+  );
+
+  if (error) {
+    console.error("Could not link documents to message:", error.message);
+  }
+}
+
 export async function getDocumentsForPrompt(ids: Array<string | number>) {
   if (ids.length === 0) return "";
 
@@ -69,20 +185,35 @@ export async function getDocumentsForPrompt(ids: Array<string | number>) {
   }
 
   return (data ?? [])
-    .map((document) =>
-      [
+    .map((document) => {
+      const extractedText = String(document.extracted_text ?? "");
+      const isImage = extractedText.startsWith("[Image file:");
+      return [
         `Document: ${document.file_name} (${document.file_type})`,
         document.summary ? `Summary: ${document.summary}` : null,
-        "Extracted content:",
-        String(document.extracted_text ?? "").slice(0, MAX_EXTRACTED_TEXT)
+        isImage ? "Image attachment: available as vision input for the model." : "Extracted content:",
+        isImage ? null : extractedText.slice(0, MAX_EXTRACTED_TEXT)
       ]
         .filter(Boolean)
-        .join("\n")
-    )
+        .join("\n");
+    })
     .join("\n\n---\n\n");
 }
 
 export async function getImageInputsForVision(ids: Array<string | number>) {
+  const imageFiles = await getImageFiles(ids);
+  return imageFiles.map((image) => ({
+    fileName: image.fileName,
+    fileType: image.fileType,
+    dataUrl: `data:${image.fileType};base64,${image.buffer.toString("base64")}`
+  }));
+}
+
+export async function getImageFilesForEdit(ids: Array<string | number>) {
+  return getImageFiles(ids);
+}
+
+async function getImageFiles(ids: Array<string | number>): Promise<StoredImageFile[]> {
   if (ids.length === 0) return [];
 
   const supabase = getSupabase();
@@ -96,14 +227,14 @@ export async function getImageInputsForVision(ids: Array<string | number>) {
     return [];
   }
 
-  const images = [];
+  const images: StoredImageFile[] = [];
   for (const document of data ?? []) {
     const metadata = document.metadata as { kind?: string } | null;
     const fileType = String(document.file_type ?? "");
     if (metadata?.kind !== "image" && !fileType.startsWith("image/")) continue;
 
     const downloaded = await supabase.storage
-      .from("documents")
+      .from(DOCUMENTS_BUCKET)
       .download(String(document.storage_path));
 
     if (downloaded.error) {
@@ -111,11 +242,10 @@ export async function getImageInputsForVision(ids: Array<string | number>) {
       continue;
     }
 
-    const buffer = Buffer.from(await downloaded.data.arrayBuffer());
     images.push({
-      fileName: String(document.file_name ?? "image"),
+      fileName: String(document.file_name ?? "image.png"),
       fileType: fileType || "image/png",
-      dataUrl: `data:${fileType || "image/png"};base64,${buffer.toString("base64")}`
+      buffer: Buffer.from(await downloaded.data.arrayBuffer())
     });
   }
 
@@ -139,6 +269,13 @@ async function extractFileText(file: File, bytes: Buffer) {
     return extractPdf(bytes);
   }
 
+  if (
+    type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
+    lowerName.endsWith(".docx")
+  ) {
+    return extractDocx(bytes);
+  }
+
   if (isTextLike(type, lowerName)) {
     return {
       text: bytes.toString("utf8").slice(0, MAX_EXTRACTED_TEXT),
@@ -148,7 +285,7 @@ async function extractFileText(file: File, bytes: Buffer) {
 
   if (type.startsWith("image/")) {
     return {
-      text: `[Image file: ${file.name}. The image is stored, but vision analysis is handled in chat requests later.]`,
+      text: `[Image file: ${file.name}.]`,
       metadata: { kind: "image", vision_ready: true }
     };
   }
@@ -202,14 +339,26 @@ async function extractPdf(bytes: Buffer) {
   };
 }
 
+async function extractDocx(bytes: Buffer) {
+  const mammoth = await import("mammoth");
+  const result = await mammoth.extractRawText({ buffer: bytes });
+  return {
+    text: String(result.value ?? "").slice(0, MAX_EXTRACTED_TEXT),
+    metadata: {
+      kind: "docx",
+      warnings: result.messages?.map((message) => message.message).slice(0, 10) ?? []
+    }
+  };
+}
+
 function summarizeExtractedText(text: string) {
   const compact = text.replace(/\s+/g, " ").trim();
-  if (!compact) return null;
+  if (!compact || compact.startsWith("[Image file:")) return null;
   return compact.slice(0, 500);
 }
 
 function sanitizeFileName(name: string) {
-  return name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+  return name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "file";
 }
 
 function inferTypeFromName(name: string) {
@@ -217,8 +366,12 @@ function inferTypeFromName(name: string) {
   if (lower.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
   if (lower.endsWith(".xls")) return "application/vnd.ms-excel";
   if (lower.endsWith(".pdf")) return "application/pdf";
+  if (lower.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
   if (lower.endsWith(".csv")) return "text/csv";
   if (lower.endsWith(".txt") || lower.endsWith(".md")) return "text/plain";
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".webp")) return "image/webp";
   return "application/octet-stream";
 }
 
@@ -227,4 +380,8 @@ function isTextLike(type: string, lowerName: string) {
     type.startsWith("text/") ||
     /\.(txt|md|csv|json|xml|html|css|js|ts|tsx|jsx|py|sql|log)$/i.test(lowerName)
   );
+}
+
+function randomId() {
+  return Math.random().toString(36).slice(2, 10);
 }

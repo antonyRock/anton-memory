@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { storeAudioFile } from "@/lib/documents";
 import { transcribeAudio } from "@/lib/transcription";
 
 export const runtime = "nodejs";
@@ -17,7 +18,8 @@ export async function POST(request: Request) {
     }
 
     const text = await transcribeAudio(audio);
-    return NextResponse.json({ text });
+    const document = await storeAudioFile({ file: audio, transcript: text });
+    return NextResponse.json({ text, documentId: document.id });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unexpected transcription error.";

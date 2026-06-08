@@ -41,12 +41,25 @@ async function safeSelect(table: "facts" | "entities" | "tasks") {
 
 async function safeSelectRecentMessages() {
   const supabase = getSupabase();
-  const { data, error } = await supabase
+  const initial = await supabase
     .from("messages")
-    .select("role, content, created_at")
+    .select("role, content, created_at, metadata")
     .eq("role", "user")
     .order("created_at", { ascending: false })
     .limit(SEARCH_POOL_LIMIT);
+  let data: Record<string, unknown>[] | null = initial.data;
+  let error = initial.error;
+
+  if (error && error.message.toLowerCase().includes("metadata")) {
+    const fallback = await supabase
+      .from("messages")
+      .select("role, content, created_at")
+      .eq("role", "user")
+      .order("created_at", { ascending: false })
+      .limit(SEARCH_POOL_LIMIT);
+    data = fallback.data as Record<string, unknown>[] | null;
+    error = fallback.error;
+  }
 
   if (error) {
     console.error("Memory select failed for messages:", error.message);
@@ -80,7 +93,7 @@ export function formatMemoryForPrompt(memory: MemoryContext) {
     ["Recent user messages", memory.recentMessages]
   ] as const;
 
-  const formatted = sections
+  return sections
     .map(([title, records]) => {
       if (records.length === 0) return `${title}: none`;
       return `${title}:\n${records
@@ -88,8 +101,6 @@ export function formatMemoryForPrompt(memory: MemoryContext) {
         .join("\n")}`;
     })
     .join("\n\n");
-
-  return formatted;
 }
 
 function rankRecords(
@@ -102,7 +113,7 @@ function rankRecords(
     .split(/[^a-zа-яё0-9]+/i)
     .filter((term) => term.length >= 3);
 
-  const ranked = records
+  return records
     .map((record, index) => {
       const text = compactRecord(record).toLowerCase();
       const score = terms.reduce(
@@ -115,17 +126,29 @@ function rankRecords(
     .sort((a, b) => b.score - a.score || a.index - b.index)
     .slice(0, SEARCH_LIMIT)
     .map(({ record }) => record);
-
-  return ranked;
 }
 
-export async function saveMessage(role: "user" | "assistant", content: string) {
+export async function saveMessage(
+  role: "user" | "assistant",
+  content: string,
+  metadata: Record<string, unknown> = {}
+) {
   const supabase = getSupabase();
-  const { data, error } = await supabase
+  let { data, error } = await supabase
     .from("messages")
-    .insert({ role, content })
+    .insert({ role, content, metadata })
     .select("id")
     .single();
+
+  if (error && error.message.toLowerCase().includes("metadata")) {
+    const fallback = await supabase
+      .from("messages")
+      .insert({ role, content })
+      .select("id")
+      .single();
+    data = fallback.data;
+    error = fallback.error;
+  }
 
   if (error) {
     throw new Error(`Could not save ${role} message: ${error.message}`);

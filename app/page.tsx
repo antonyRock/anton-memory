@@ -50,27 +50,28 @@ export default function Home() {
     }
 
     const readyFiles = files.filter((file) => file.status === "ready" && file.id);
+    const readyDocumentIds = readyFiles.map((file) => file.id);
     const displayText = trimmed || files.map((file) => file.name).join(", ");
+    const hasImageAttachment = readyFiles.some((file) => file.type.startsWith("image/"));
+    const imageIntent = shouldGenerateImage(trimmed) || (hasImageAttachment && shouldEditImage(trimmed));
 
-    const nextMessages: ChatMessage[] = [
-      ...messages,
-      { role: "user", content: displayText }
-    ];
-    setMessages(nextMessages);
+    setMessages((current) => [...current, { role: "user", content: displayText }]);
     setInput("");
     setAttachments([]);
     setIsLoading(true);
-    setNote("Ищу память и формулирую ответ");
+    setNote(imageIntent ? "Работаю с изображением" : "Формулирую ответ");
 
     try {
-      const isImageRequest = shouldGenerateImage(trimmed);
-      const response = await fetch(isImageRequest ? "/api/images" : "/api/chat", {
+      const response = await fetch(imageIntent ? "/api/images" : "/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(
-          isImageRequest
-            ? { prompt: trimmed }
-            : { message: trimmed || "Посмотри прикрепленные файлы.", documentIds: readyFiles.map((file) => file.id) }
+          imageIntent
+            ? { prompt: trimmed, documentIds: readyDocumentIds }
+            : {
+                message: trimmed || "Посмотри прикреплённые файлы.",
+                documentIds: readyDocumentIds
+              }
         )
       });
 
@@ -83,7 +84,7 @@ export default function Home() {
         ...current,
         { role: "assistant", content: data.answer, imageUrl: data.imageUrl }
       ]);
-      setNote("Память обновлена");
+      setNote("Готово");
     } catch (error) {
       setMessages((current) => [
         ...current,
@@ -157,7 +158,15 @@ export default function Home() {
           if (!response.ok) {
             throw new Error(data.error ?? "Не удалось распознать аудио");
           }
-          await sendMessage(data.text);
+          await sendMessage(data.text, [
+            {
+              id: data.documentId,
+              name: "voice.webm",
+              type: "audio/webm",
+              size: blob.size,
+              status: "ready"
+            }
+          ]);
         } catch (error) {
           setNote(
             error instanceof Error
@@ -171,7 +180,7 @@ export default function Home() {
       recordingActionRef.current = "send";
       recorder.start();
       setIsRecording(true);
-      setNote("Идет запись");
+      setNote("Идёт запись");
     } catch {
       setNote("Браузер не дал доступ к микрофону");
     }
@@ -182,7 +191,7 @@ export default function Home() {
     const selectedFiles = Array.from(fileList);
     const pendingAttachments: Attachment[] = selectedFiles.map((file) => ({
       name: file.name,
-      type: file.type || "application/octet-stream",
+      type: file.type || inferClientFileType(file.name),
       size: file.size,
       status: "uploading"
     }));
@@ -251,7 +260,7 @@ export default function Home() {
           <div className="brand-mark">B</div>
           <div className="brand-title">
             <strong>Второй мозг</strong>
-            <span>личная долговременная память</span>
+            <span>ChatGPT-like с личной памятью</span>
           </div>
         </div>
         <div className="status">{note}</div>
@@ -295,7 +304,7 @@ export default function Home() {
         {isRecording ? (
           <div className="recording-pill">
             <span className="recording-dot" />
-            <span>Идет запись</span>
+            <span>Идёт запись</span>
             <div className="recording-bars" aria-hidden="true">
               <span />
               <span />
@@ -346,11 +355,11 @@ export default function Home() {
             {isRecording ? <Square size={20} /> : <Paperclip size={20} />}
           </button>
           <button
-            aria-label={isRecording ? "Запись идет" : "Начать запись"}
+            aria-label={isRecording ? "Запись идёт" : "Начать запись"}
             className={`icon-button ${isRecording ? "recording" : ""}`}
             disabled={isLoading || isRecording}
             onClick={startRecording}
-            title={isRecording ? "Запись идет" : "Микрофон"}
+            title={isRecording ? "Запись идёт" : "Микрофон"}
             type="button"
           >
             <Mic size={20} />
@@ -390,7 +399,27 @@ export default function Home() {
 }
 
 function shouldGenerateImage(message: string) {
-  return /(?:создай|сгенерируй|нарисуй|generate|create).{0,40}(?:изображ|картин|image|picture)/i.test(
+  return /(?:создай|сгенерируй|нарисуй|generate|create|make).{0,60}(?:изображ|картин|image|picture|photo|фото)/i.test(
     message
   );
+}
+
+function shouldEditImage(message: string) {
+  return /(?:улучши|измени|перегенерируй|переделай|отредактируй|сделай|добавь|убери|замени|вариант|edit|improve|change|modify|variation)/i.test(
+    message
+  );
+}
+
+function inferClientFileType(name: string) {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".png")) return "image/png";
+  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+  if (lower.endsWith(".webp")) return "image/webp";
+  if (lower.endsWith(".pdf")) return "application/pdf";
+  if (lower.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+  if (lower.endsWith(".xls")) return "application/vnd.ms-excel";
+  if (lower.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+  if (lower.endsWith(".csv")) return "text/csv";
+  if (lower.endsWith(".txt") || lower.endsWith(".md")) return "text/plain";
+  return "application/octet-stream";
 }
