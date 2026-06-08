@@ -167,18 +167,8 @@ export default function Home() {
   }, [activeMatchIndex, matchCount]);
 
   async function bootstrap() {
-    const loaded = await loadConversations("");
-    const savedConversationId = window.localStorage.getItem("activeConversationId");
-    const restored =
-      loaded.find((conversation) => String(conversation.id) === savedConversationId) ?? loaded[0];
-
-    if (restored) {
-      setActiveConversationId(restored.id);
-      await loadMessages(restored.id);
-      return;
-    }
-
-    await newChat();
+    await loadConversations("");
+    resetToNewChat();
   }
 
   async function loadConversations(query = search) {
@@ -223,15 +213,21 @@ export default function Home() {
     }
   }
 
-  async function newChat() {
-    if (activeConversationId && messages.length === 0 && !isLoading) {
-      setInput("");
-      setAttachments([]);
-      setSearch("");
-      setSidebarOpen(false);
-      return activeConversationId;
-    }
+  function resetToNewChat() {
+    shouldAutoScrollRef.current = false;
+    pendingResetScrollRef.current = true;
+    resetMessagesScroll();
+    setActiveConversationId(null);
+    setMessages([]);
+    setInput("");
+    setAttachments([]);
+    setSearch("");
+    setSidebarOpen(false);
+    setNote(DEFAULT_CHAT_TITLE);
+    window.localStorage.removeItem("activeConversationId");
+  }
 
+  async function createConversation() {
     try {
       const response = await fetch("/api/conversations", { method: "POST" });
       const data = await response.json();
@@ -243,14 +239,6 @@ export default function Home() {
       ]);
       setActiveConversationId(conversation.id);
       window.localStorage.setItem("activeConversationId", String(conversation.id));
-      shouldAutoScrollRef.current = false;
-      pendingResetScrollRef.current = true;
-      setMessages([]);
-      setInput("");
-      setAttachments([]);
-      setSearch("");
-      setSidebarOpen(false);
-      setNote(DEFAULT_CHAT_TITLE);
       return conversation.id;
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Не удалось создать чат");
@@ -337,7 +325,7 @@ export default function Home() {
     }
 
     let conversationId = activeConversationId;
-    if (!conversationId) conversationId = await newChat();
+    if (!conversationId) conversationId = await createConversation();
     if (!conversationId) return;
 
     const readyFiles = files.filter((file) => file.status === "ready" && file.id);
@@ -604,7 +592,7 @@ export default function Home() {
           </div>
 
           <div className="sidebar-actions">
-            <button className="sidebar-action" onClick={() => void newChat()} type="button">
+            <button className="sidebar-action" onClick={resetToNewChat} type="button">
               <Plus size={18} />
               Новый чат
             </button>
