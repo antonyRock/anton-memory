@@ -126,6 +126,14 @@ alter table public.message_documents add column if not exists relation_type text
 alter table public.message_documents add column if not exists created_at timestamptz default now();
 alter table public.message_documents add column if not exists metadata jsonb default '{}'::jsonb;
 
+insert into public.conversations (title, summary, metadata)
+select 'История', 'Импорт старых сообщений', '{"legacy_import": true}'::jsonb
+where not exists (select 1 from public.conversations);
+
+update public.messages
+set conversation_id = (select id from public.conversations order by created_at asc limit 1)
+where conversation_id is null;
+
 create or replace function public.set_updated_at()
 returns trigger
 language plpgsql
