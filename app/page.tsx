@@ -75,6 +75,7 @@ export default function Home() {
   const chunksRef = useRef<BlobPart[]>([]);
   const recordingActionRef = useRef<"send" | "cancel">("send");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const messagesRef = useRef<HTMLElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
   const hasMessages = messages.length > 0;
@@ -150,6 +151,9 @@ export default function Home() {
           })
         )
       );
+      window.requestAnimationFrame(() => {
+        if (messagesRef.current) messagesRef.current.scrollTop = 0;
+      });
       window.localStorage.setItem("activeConversationId", String(conversationId));
       setSidebarOpen(false);
     } catch (error) {
@@ -562,7 +566,11 @@ export default function Home() {
           <div className="status">{note}</div>
         </header>
 
-        <section className={`messages ${hasMessages ? "" : "empty"}`} aria-live="polite">
+        <section
+          className={`messages ${hasMessages ? "" : "empty"}`}
+          ref={messagesRef}
+          aria-live="polite"
+        >
           {!hasMessages ? (
             <div className="empty-state">
               <div>
