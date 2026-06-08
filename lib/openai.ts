@@ -3,6 +3,7 @@ import OpenAI from "openai";
 export const chatModel = process.env.OPENAI_CHAT_MODEL ?? "gpt-4o-mini";
 export const transcriptionModel =
   process.env.OPENAI_TRANSCRIPTION_MODEL ?? "gpt-4o-mini-transcribe";
+export const imageModel = process.env.OPENAI_IMAGE_MODEL ?? "gpt-image-1";
 
 let cachedClient: OpenAI | null = null;
 

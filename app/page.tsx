@@ -1,11 +1,19 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
-import { Loader2, Mic, Send, Square } from "lucide-react";
+import { Loader2, Mic, Paperclip, Send, Square } from "lucide-react";
 
 type ChatMessage = {
   role: "user" | "assistant";
   content: string;
+  imageUrl?: string;
+};
+
+type Attachment = {
+  name: string;
+  type: string;
+  size: number;
+  text?: string;
 };
 
 export default function Home() {
@@ -13,9 +21,12 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [note, setNote] = useState("Готово к вводу");
   const recorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
+  const recordingActionRef = useRef<"send" | "cancel">("send");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const hasMessages = messages.length > 0;
 
@@ -27,24 +38,33 @@ export default function Home() {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading]);
 
-  async function sendMessage(text: string) {
+  async function sendMessage(text: string, files = attachments) {
     const trimmed = text.trim();
-    if (!trimmed || isLoading) return;
+    if ((!trimmed && files.length === 0) || isLoading) return;
+
+    const messageForApi = buildMessageWithAttachments(trimmed, files);
+    const displayText = trimmed || files.map((file) => file.name).join(", ");
 
     const nextMessages: ChatMessage[] = [
       ...messages,
-      { role: "user", content: trimmed }
+      { role: "user", content: displayText }
     ];
     setMessages(nextMessages);
     setInput("");
+    setAttachments([]);
     setIsLoading(true);
     setNote("Ищу память и формулирую ответ");
 
     try {
-      const response = await fetch("/api/chat", {
+      const isImageRequest = shouldGenerateImage(trimmed);
+      const response = await fetch(isImageRequest ? "/api/images" : "/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: trimmed })
+        body: JSON.stringify(
+          isImageRequest
+            ? { prompt: trimmed }
+            : { message: messageForApi, attachments: files }
+        )
       });
 
       const data = await response.json();
@@ -54,7 +74,7 @@ export default function Home() {
 
       setMessages((current) => [
         ...current,
-        { role: "assistant", content: data.answer }
+        { role: "assistant", content: data.answer, imageUrl: data.imageUrl }
       ]);
       setNote("Память обновлена");
     } catch (error) {
@@ -76,12 +96,21 @@ export default function Home() {
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isRecording) {
+      stopRecording("send");
+      return;
+    }
     await sendMessage(input);
   }
 
-  async function toggleRecording() {
+  function stopRecording(action: "send" | "cancel") {
+    recordingActionRef.current = action;
+    recorderRef.current?.stop();
+  }
+
+  async function startRecording() {
     if (isRecording) {
-      recorderRef.current?.stop();
+      stopRecording("cancel");
       return;
     }
 
@@ -97,6 +126,13 @@ export default function Home() {
       recorder.onstop = async () => {
         stream.getTracks().forEach((track) => track.stop());
         setIsRecording(false);
+
+        if (recordingActionRef.current === "cancel") {
+          chunksRef.current = [];
+          setNote("Запись отменена");
+          return;
+        }
+
         setNote("Расшифровываю голос");
 
         const blob = new Blob(chunksRef.current, {
@@ -125,12 +161,35 @@ export default function Home() {
       };
 
       recorderRef.current = recorder;
+      recordingActionRef.current = "send";
       recorder.start();
       setIsRecording(true);
       setNote("Идет запись");
     } catch {
       setNote("Браузер не дал доступ к микрофону");
     }
+  }
+
+  async function onFilesSelected(fileList: FileList | null) {
+    if (!fileList?.length) return;
+    const nextAttachments: Attachment[] = [];
+
+    for (const file of Array.from(fileList)) {
+      const attachment: Attachment = {
+        name: file.name,
+        type: file.type || "application/octet-stream",
+        size: file.size
+      };
+
+      if (isTextLikeFile(file) && file.size <= 500_000) {
+        attachment.text = await file.text();
+      }
+
+      nextAttachments.push(attachment);
+    }
+
+    setAttachments((current) => [...current, ...nextAttachments]);
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   return (
@@ -162,7 +221,12 @@ export default function Home() {
               {message.role === "assistant" ? (
                 <div className="avatar">B</div>
               ) : null}
-              <div className="bubble">{message.content}</div>
+              <div className="bubble">
+                {message.content}
+                {message.imageUrl ? (
+                  <img className="generated-image" src={message.imageUrl} alt="Generated result" />
+                ) : null}
+              </div>
             </article>
           ))
         )}
@@ -176,16 +240,66 @@ export default function Home() {
       </section>
 
       <div className={`composer-wrap ${hasMessages ? "" : "empty"}`}>
+        {isRecording ? (
+          <div className="recording-pill">
+            <span className="recording-dot" />
+            <span>Идет запись</span>
+            <div className="recording-bars" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+              <span />
+            </div>
+          </div>
+        ) : null}
+        {attachments.length > 0 ? (
+          <div className="attachments">
+            {attachments.map((attachment, index) => (
+              <button
+                className="attachment-chip"
+                key={`${attachment.name}-${index}`}
+                onClick={() =>
+                  setAttachments((current) =>
+                    current.filter((_, currentIndex) => currentIndex !== index)
+                  )
+                }
+                title="Убрать файл"
+                type="button"
+              >
+                {attachment.name}
+              </button>
+            ))}
+          </div>
+        ) : null}
         <form className="composer" onSubmit={onSubmit}>
+          <input
+            ref={fileInputRef}
+            className="file-input"
+            multiple
+            onChange={(event) => void onFilesSelected(event.target.files)}
+            type="file"
+          />
           <button
-            aria-label={isRecording ? "Остановить запись" : "Начать запись"}
-            className={`icon-button ${isRecording ? "recording" : ""}`}
+            aria-label={isRecording ? "Отменить запись" : "Добавить файл"}
+            className="icon-button"
             disabled={isLoading}
-            onClick={toggleRecording}
-            title={isRecording ? "Остановить запись" : "Микрофон"}
+            onClick={() =>
+              isRecording ? stopRecording("cancel") : fileInputRef.current?.click()
+            }
+            title={isRecording ? "Отменить запись" : "Добавить файл"}
             type="button"
           >
-            {isRecording ? <Square size={20} /> : <Mic size={20} />}
+            {isRecording ? <Square size={20} /> : <Paperclip size={20} />}
+          </button>
+          <button
+            aria-label={isRecording ? "Запись идет" : "Начать запись"}
+            className={`icon-button ${isRecording ? "recording" : ""}`}
+            disabled={isLoading || isRecording}
+            onClick={startRecording}
+            title={isRecording ? "Запись идет" : "Микрофон"}
+            type="button"
+          >
+            <Mic size={20} />
           </button>
           <textarea
             aria-label="Сообщение"
@@ -202,10 +316,10 @@ export default function Home() {
             value={input}
           />
           <button
-            aria-label="Отправить"
+            aria-label={isRecording ? "Отправить запись" : "Отправить"}
             className="icon-button primary"
-            disabled={isLoading || isRecording || !input.trim()}
-            title="Отправить"
+            disabled={isLoading || (!isRecording && !input.trim() && attachments.length === 0)}
+            title={isRecording ? "Отправить запись" : "Отправить"}
             type="submit"
           >
             {isLoading ? (
@@ -218,5 +332,32 @@ export default function Home() {
         {hasMessages ? <div className="composer-note">{note}</div> : null}
       </div>
     </main>
+  );
+}
+
+function buildMessageWithAttachments(message: string, attachments: Attachment[]) {
+  if (attachments.length === 0) return message;
+
+  const attachmentText = attachments
+    .map((attachment) => {
+      const header = `File: ${attachment.name} (${attachment.type}, ${attachment.size} bytes)`;
+      if (!attachment.text) return header;
+      return `${header}\nContent:\n${attachment.text.slice(0, 12000)}`;
+    })
+    .join("\n\n");
+
+  return [message, `Attached files:\n${attachmentText}`].filter(Boolean).join("\n\n");
+}
+
+function isTextLikeFile(file: File) {
+  return (
+    file.type.startsWith("text/") ||
+    /\.(txt|md|csv|json|xml|html|css|js|ts|tsx|jsx|py|sql|log)$/i.test(file.name)
+  );
+}
+
+function shouldGenerateImage(message: string) {
+  return /(?:создай|сгенерируй|нарисуй|generate|create).{0,40}(?:изображ|картин|image|picture)/i.test(
+    message
   );
 }

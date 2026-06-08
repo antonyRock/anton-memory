@@ -207,7 +207,7 @@ button {
   width: min(760px, calc(100vw - 32px));
   margin: 0 auto;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto 1fr auto;
   align-items: end;
   gap: 8px;
   padding: 8px;
@@ -215,6 +215,10 @@ button {
   border-radius: 22px;
   background: var(--panel);
   box-shadow: var(--shadow);
+}
+
+.file-input {
+  display: none;
 }
 
 .composer textarea {
@@ -286,6 +290,105 @@ button {
   color: var(--muted);
   font-size: 12px;
   text-align: center;
+}
+
+.recording-pill,
+.attachments {
+  width: min(760px, calc(100vw - 32px));
+  margin: 0 auto 8px;
+}
+
+.recording-pill {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: #ffffff;
+  font-size: 13px;
+}
+
+.recording-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--danger);
+  box-shadow: 0 0 0 0 rgba(180, 35, 24, 0.72);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.recording-bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 18px;
+}
+
+.recording-bars span {
+  width: 3px;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: bars 0.9s ease-in-out infinite;
+}
+
+.recording-bars span:nth-child(2) {
+  animation-delay: 0.12s;
+}
+
+.recording-bars span:nth-child(3) {
+  animation-delay: 0.24s;
+}
+
+.recording-bars span:nth-child(4) {
+  animation-delay: 0.36s;
+}
+
+.attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.attachment-chip {
+  max-width: min(260px, 70vw);
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  color: var(--text);
+  background: #171717;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.generated-image {
+  display: block;
+  width: min(420px, 100%);
+  margin-top: 12px;
+  border-radius: 8px;
+}
+
+@keyframes pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(180, 35, 24, 0.72);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(180, 35, 24, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(180, 35, 24, 0);
+  }
+}
+
+@keyframes bars {
+  0%,
+  100% {
+    height: 6px;
+  }
+  50% {
+    height: 18px;
+  }
 }
 
 @media (max-width: 600px) {
