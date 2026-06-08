@@ -272,6 +272,10 @@ button {
   justify-content: flex-end;
 }
 
+.message-row.has-attachments .bubble {
+  min-width: min(360px, 86vw);
+}
+
 .avatar {
   flex: 0 0 auto;
   width: 30px;
@@ -573,6 +577,144 @@ button {
   width: min(420px, 100%);
   margin-top: 12px;
   border-radius: 8px;
+}
+
+.message-attachments {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.message-image-attachment {
+  width: min(280px, 100%);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0;
+  overflow: hidden;
+  color: var(--text);
+  background: #171717;
+  cursor: pointer;
+  text-align: left;
+}
+
+.message-image-attachment img {
+  display: block;
+  width: 100%;
+  height: 180px;
+  object-fit: cover;
+  background: #101010;
+}
+
+.message-image-attachment span {
+  display: block;
+  overflow: hidden;
+  padding: 8px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-file-attachment {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  width: min(360px, 100%);
+  min-height: 58px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #171717;
+}
+
+.message-file-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: #d6d6d6;
+  background: #2b2b2b;
+}
+
+.message-file-meta {
+  min-width: 0;
+}
+
+.message-file-meta strong,
+.message-file-meta span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.message-file-meta strong {
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.message-file-meta span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.image-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.image-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  background: rgba(0, 0, 0, 0.82);
+}
+
+.image-modal-content {
+  position: relative;
+  z-index: 1;
+  max-width: min(980px, 94vw);
+  max-height: 92dvh;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.image-modal-content img {
+  display: block;
+  max-width: 100%;
+  max-height: 84dvh;
+  border-radius: 10px;
+  object-fit: contain;
+}
+
+.image-modal-content div {
+  margin-top: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-modal-close {
+  position: absolute;
+  top: -14px;
+  right: -14px;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  background: #2a2a2a;
+  cursor: pointer;
 }
 
 @keyframes pulse {

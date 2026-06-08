@@ -1,3 +1,4 @@
+import { getDocumentsForMessages } from "@/lib/documents";
 import { getOpenAI, chatModel } from "@/lib/openai";
 import { getSupabase } from "@/lib/supabase";
 
@@ -149,25 +150,30 @@ export async function createConversation(title = DEFAULT_TITLE) {
 
 export async function getConversationMessages(conversationId: string | number) {
   const supabase = getSupabase();
-  if (String(conversationId) === "legacy") {
-    const { data, error } = await supabase
-      .from("messages")
-      .select("id, role, content, metadata, created_at")
-      .order("created_at", { ascending: true })
-      .limit(200);
-    if (error) throw new Error(`Could not load messages: ${error.message}`);
-    return data ?? [];
-  }
+  const query =
+    String(conversationId) === "legacy"
+      ? supabase
+          .from("messages")
+          .select("id, role, content, metadata, created_at")
+          .order("created_at", { ascending: true })
+          .limit(200)
+      : supabase
+          .from("messages")
+          .select("id, role, content, metadata, created_at")
+          .eq("conversation_id", conversationId)
+          .order("created_at", { ascending: true })
+          .limit(200);
 
-  const { data, error } = await supabase
-    .from("messages")
-    .select("id, role, content, metadata, created_at")
-    .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: true })
-    .limit(200);
-
+  const { data, error } = await query;
   if (error) throw new Error(`Could not load messages: ${error.message}`);
-  return data ?? [];
+
+  const messages = data ?? [];
+  const documentsByMessage = await getDocumentsForMessages(messages);
+
+  return messages.map((message) => ({
+    ...message,
+    attachments: documentsByMessage.get(String(message.id)) ?? []
+  }));
 }
 
 export async function getShortTermContext(conversationId?: string | number) {

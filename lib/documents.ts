@@ -12,6 +12,17 @@ export type StoredDocument = {
   metadata: Record<string, unknown>;
 };
 
+export type DocumentAttachment = {
+  id: string | number;
+  fileName: string;
+  fileType: string;
+  fileSize: number;
+  summary: string | null;
+  metadata: Record<string, unknown>;
+  previewUrl?: string | null;
+  fullUrl?: string | null;
+};
+
 export type StoredImageFile = {
   fileName: string;
   fileType: string;
@@ -170,6 +181,81 @@ export async function linkDocumentsToMessage(input: {
   }
 }
 
+export async function getDocumentAttachments(ids: Array<string | number>) {
+  if (ids.length === 0) return [];
+
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("documents")
+    .select("id, file_name, file_type, file_size, storage_path, summary, metadata")
+    .in("id", ids);
+
+  if (error) {
+    console.error("Document attachment retrieval failed:", error.message);
+    return [];
+  }
+
+  return Promise.all((data ?? []).map(toDocumentAttachment));
+}
+
+export async function getDocumentsForMessages(
+  messages: Array<{ id: string | number; metadata?: unknown }>
+) {
+  if (messages.length === 0) return new Map<string, DocumentAttachment[]>();
+
+  const supabase = getSupabase();
+  const messageIds = messages.map((message) => Number(message.id)).filter(Number.isFinite);
+  const byMessage = new Map<string, DocumentAttachment[]>();
+  const idsFromMetadata = new Map<string, Array<string | number>>();
+
+  for (const message of messages) {
+    const metadata = message.metadata as { document_ids?: Array<string | number>; generated_document_id?: string | number } | null;
+    const ids = [
+      ...(metadata?.document_ids ?? []),
+      ...(metadata?.generated_document_id ? [metadata.generated_document_id] : [])
+    ];
+    if (ids.length > 0) idsFromMetadata.set(String(message.id), ids);
+  }
+
+  const linked = messageIds.length
+    ? await supabase
+        .from("message_documents")
+        .select("message_id, document_id")
+        .in("message_id", messageIds)
+    : { data: [], error: null };
+
+  if (linked.error) {
+    console.error("Message document links failed:", linked.error.message);
+  }
+
+  const docIdsByMessage = new Map<string, Set<string | number>>();
+  for (const [messageId, ids] of idsFromMetadata) {
+    docIdsByMessage.set(messageId, new Set(ids));
+  }
+
+  for (const link of linked.data ?? []) {
+    const messageId = String(link.message_id);
+    const set = docIdsByMessage.get(messageId) ?? new Set<string | number>();
+    set.add(link.document_id);
+    docIdsByMessage.set(messageId, set);
+  }
+
+  const allDocumentIds = [...new Set([...docIdsByMessage.values()].flatMap((set) => [...set]))];
+  const attachments = await getDocumentAttachments(allDocumentIds);
+  const attachmentById = new Map(attachments.map((attachment) => [String(attachment.id), attachment]));
+
+  for (const [messageId, documentIds] of docIdsByMessage) {
+    byMessage.set(
+      messageId,
+      [...documentIds]
+        .map((documentId) => attachmentById.get(String(documentId)))
+        .filter((attachment): attachment is DocumentAttachment => Boolean(attachment))
+    );
+  }
+
+  return byMessage;
+}
+
 export async function getDocumentsForPrompt(ids: Array<string | number>) {
   if (ids.length === 0) return "";
 
@@ -231,7 +317,7 @@ async function getImageFiles(ids: Array<string | number>): Promise<StoredImageFi
   for (const document of data ?? []) {
     const metadata = document.metadata as { kind?: string } | null;
     const fileType = String(document.file_type ?? "");
-    if (metadata?.kind !== "image" && !fileType.startsWith("image/")) continue;
+    if (!isImageDocument(fileType, metadata)) continue;
 
     const downloaded = await supabase.storage
       .from(DOCUMENTS_BUCKET)
@@ -250,6 +336,39 @@ async function getImageFiles(ids: Array<string | number>): Promise<StoredImageFi
   }
 
   return images;
+}
+
+async function toDocumentAttachment(document: Record<string, unknown>): Promise<DocumentAttachment> {
+  const fileType = String(document.file_type ?? "application/octet-stream");
+  const metadata = normalizeMetadata(document.metadata);
+  const storagePath = String(document.storage_path ?? "");
+  const isImage = isImageDocument(fileType, metadata);
+  const signedUrl = isImage && storagePath ? await createSignedUrl(storagePath) : null;
+
+  return {
+    id: document.id as string | number,
+    fileName: String(document.file_name ?? "file"),
+    fileType,
+    fileSize: Number(document.file_size ?? 0),
+    summary: document.summary ? String(document.summary) : null,
+    metadata,
+    previewUrl: signedUrl,
+    fullUrl: signedUrl
+  };
+}
+
+async function createSignedUrl(storagePath: string) {
+  const supabase = getSupabase();
+  const { data, error } = await supabase.storage
+    .from(DOCUMENTS_BUCKET)
+    .createSignedUrl(storagePath, 60 * 60);
+
+  if (error) {
+    console.error("Could not create signed URL:", error.message);
+    return null;
+  }
+
+  return data.signedUrl;
 }
 
 async function extractFileText(file: File, bytes: Buffer) {
@@ -317,6 +436,7 @@ function extractSpreadsheet(bytes: Buffer) {
     metadata: {
       kind: "spreadsheet",
       sheet_count: sheets.length,
+      row_count: sheets.reduce((sum, sheet) => sum + sheet.rowCount, 0),
       sheets: sheets.map((sheet) => ({
         name: sheet.sheetName,
         headers: sheet.headers,
@@ -380,6 +500,18 @@ function isTextLike(type: string, lowerName: string) {
     type.startsWith("text/") ||
     /\.(txt|md|csv|json|xml|html|css|js|ts|tsx|jsx|py|sql|log)$/i.test(lowerName)
   );
+}
+
+function isImageDocument(fileType: string, metadata?: { kind?: string } | null) {
+  return (
+    fileType.startsWith("image/") ||
+    metadata?.kind === "image" ||
+    metadata?.kind === "generated_image"
+  );
+}
+
+function normalizeMetadata(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
 }
 
 function randomId() {

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { processAndStoreFile } from "@/lib/documents";
+import { getDocumentAttachments, processAndStoreFile } from "@/lib/documents";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -17,16 +17,10 @@ export async function POST(request: Request) {
     for (const file of files) {
       documents.push(await processAndStoreFile(file));
     }
+    const attachments = await getDocumentAttachments(documents.map((document) => document.id));
 
     return NextResponse.json({
-      documents: documents.map((document) => ({
-        id: document.id,
-        fileName: document.file_name,
-        fileType: document.file_type,
-        fileSize: document.file_size,
-        summary: document.summary,
-        metadata: document.metadata
-      }))
+      documents: attachments
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unexpected file upload error.";
