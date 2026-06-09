@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getDocumentAttachments, processAndStoreFile } from "@/lib/documents";
+import { processAndStoreFile, storedDocumentToAttachment } from "@/lib/documents";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -13,11 +13,22 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "No files uploaded." }, { status: 400 });
     }
 
+    const projectIdRaw = formData.get("projectId");
+    const projectId =
+      typeof projectIdRaw === "string" && projectIdRaw.trim() ? projectIdRaw.trim() : null;
+
     const documents = [];
     for (const file of files) {
-      documents.push(await processAndStoreFile(file));
+      documents.push(await processAndStoreFile(file, projectId));
     }
-    const attachments = await getDocumentAttachments(documents.map((document) => document.id));
+    const attachments = await Promise.all(documents.map(storedDocumentToAttachment));
+
+    if (attachments.length !== files.length) {
+      return NextResponse.json(
+        { error: "Файл сохранён, но не удалось подготовить ответ для интерфейса." },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json({
       documents: attachments

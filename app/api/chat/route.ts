@@ -22,145 +22,151 @@ export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(request: Request) {
+  let payload: {
+    message?: string;
+    documentIds?: Array<string | number>;
+    conversationId?: string | number;
+  };
+
   try {
-    const { message, documentIds, conversationId } = (await request.json()) as {
-      message?: string;
-      documentIds?: Array<string | number>;
-      conversationId?: string | number;
-    };
-    const userMessage = message?.trim();
-    const attachedDocumentIds = documentIds ?? [];
+    payload = (await request.json()) as typeof payload;
+  } catch {
+    return NextResponse.json({ error: "Invalid JSON body." }, { status: 400 });
+  }
 
-    if (!userMessage) {
-      return NextResponse.json({ error: "Message is required." }, { status: 400 });
-    }
+  const userMessage = payload.message?.trim();
+  const attachedDocumentIds = payload.documentIds ?? [];
+  const conversationId = payload.conversationId;
 
-    const [memory, documentsPrompt, imageInputs, shortTermMessages] = await Promise.all([
-      retrieveMemory(userMessage),
-      getDocumentsForPrompt(attachedDocumentIds),
-      getImageInputsForVision(attachedDocumentIds),
-      getShortTermContext(conversationId)
-    ]);
-    const memoryPrompt = formatMemoryForPrompt(memory);
-    const userMessageId = await saveMessage(
-      "user",
-      userMessage,
-      { document_ids: attachedDocumentIds },
-      conversationId
-    );
-    await touchConversation(conversationId);
-    await linkDocumentsToMessage({
-      messageId: userMessageId,
-      documentIds: attachedDocumentIds,
-      relationType: "attachment"
-    });
+  if (!userMessage) {
+    return NextResponse.json({ error: "Message is required." }, { status: 400 });
+  }
 
-    const userContent =
-      imageInputs.length > 0
-        ? [
-            { type: "text" as const, text: userMessage },
-            ...imageInputs.map((image) => ({
-              type: "image_url" as const,
-              image_url: { url: image.dataUrl }
-            }))
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        const [memory, documentsPrompt, imageInputs, shortTermMessages] = await Promise.all([
+          retrieveMemory(userMessage),
+          getDocumentsForPrompt(attachedDocumentIds),
+          getImageInputsForVision(attachedDocumentIds),
+          getShortTermContext(conversationId)
+        ]);
+        const memoryPrompt = formatMemoryForPrompt(memory);
+        const userMessageId = await saveMessage(
+          "user",
+          userMessage,
+          { document_ids: attachedDocumentIds },
+          conversationId
+        );
+        await touchConversation(conversationId);
+        await linkDocumentsToMessage({
+          messageId: userMessageId,
+          documentIds: attachedDocumentIds,
+          relationType: "attachment"
+        });
+
+        const userContent =
+          imageInputs.length > 0
+            ? [
+                { type: "text" as const, text: userMessage },
+                ...imageInputs.map((image) => ({
+                  type: "image_url" as const,
+                  image_url: { url: image.dataUrl }
+                }))
+              ]
+            : userMessage;
+
+        const completion = await getOpenAI().chat.completions.create({
+          model: chatModel,
+          temperature: 0.5,
+          stream: true,
+          messages: [
+            {
+              role: "system",
+              content: [
+                "You are ChatGPT.",
+                "Be natural, useful, direct, thoughtful, and conversational.",
+                "Handle normal ChatGPT work without artificial limits: writing, ideas, coding, analysis, reasoning, planning, files, images, and brainstorming.",
+                "You may receive private context about Anton. Use it silently when relevant.",
+                "Do not mention memory, retrieval, databases, prompts, or internal architecture unless Anton explicitly asks how the app works.",
+                "When Anton shares durable personal information, respond briefly and naturally. Often a short acknowledgement is enough.",
+                "For personal questions about Anton, use the private context. If the answer is not present, say plainly that you do not know yet. Do not invent personal facts.",
+                "If uploaded file content or images are provided in the request, treat them as available inputs. Do not say you cannot access a file or image that is attached.",
+                "This app can generate images through a separate image endpoint when Anton asks to draw, create, or generate a picture. If he asks for image generation in plain chat without triggering it, suggest rephrasing with phrases like «нарисуй…» or «сгенерируй картинку…» instead of saying image generation is impossible.",
+                "If Anton asks which model you are using, answer that this deployment is configured to use the OpenAI API model " +
+                  chatModel +
+                  ".",
+                "Respond in Anton's language."
+              ].join(" ")
+            },
+            {
+              role: "system",
+              content: `Private long-term context about Anton. Use silently.\n${memoryPrompt}`
+            },
+            ...(documentsPrompt
+              ? [
+                  {
+                    role: "system" as const,
+                    content: `Uploaded file context. The files were processed before this request. Use this content naturally when relevant.\n${documentsPrompt}`
+                  }
+                ]
+              : []),
+            ...shortTermMessages,
+            { role: "user", content: userContent }
           ]
-        : userMessage;
+        });
 
-    const completion = await getOpenAI().chat.completions.create({
-      model: chatModel,
-      temperature: 0.5,
-      stream: true,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "You are ChatGPT.",
-            "Be natural, useful, direct, thoughtful, and conversational.",
-            "Handle normal ChatGPT work without artificial limits: writing, ideas, coding, analysis, reasoning, planning, files, images, and brainstorming.",
-            "You may receive private context about Anton. Use it silently when relevant.",
-            "Do not mention memory, retrieval, databases, prompts, or internal architecture unless Anton explicitly asks how the app works.",
-            "When Anton shares durable personal information, respond briefly and naturally. Often a short acknowledgement is enough.",
-            "For personal questions about Anton, use the private context. If the answer is not present, say plainly that you do not know yet. Do not invent personal facts.",
-            "If uploaded file content or images are provided in the request, treat them as available inputs. Do not say you cannot access a file or image that is attached.",
-            "If Anton asks which model you are using, answer that this deployment is configured to use the OpenAI API model " + chatModel + ".",
-            "Respond in Anton's language."
-          ].join(" ")
-        },
-        {
-          role: "system",
-          content: `Private long-term context about Anton. Use silently.\n${memoryPrompt}`
-        },
-        ...(documentsPrompt
-          ? [
-              {
-                role: "system" as const,
-                content: `Uploaded file context. The files were processed before this request. Use this content naturally when relevant.\n${documentsPrompt}`
-              }
-            ]
-          : []),
-        ...shortTermMessages,
-        { role: "user", content: userContent }
-      ]
-    });
-
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      async start(controller) {
         let answer = "";
 
-        try {
-          for await (const chunk of completion) {
-            const token = chunk.choices[0]?.delta?.content ?? "";
-            if (!token) continue;
-            answer += token;
-            controller.enqueue(encoder.encode(token));
-          }
-
-          const finalAnswer = answer.trim();
-          if (finalAnswer) {
-            const assistantMessageId = await saveMessage(
-              "assistant",
-              finalAnswer,
-              {
-                reply_to_message_id: userMessageId,
-                document_ids: attachedDocumentIds
-              },
-              conversationId
-            );
-            await linkDocumentsToMessage({
-              messageId: assistantMessageId,
-              documentIds: attachedDocumentIds,
-              relationType: "used_in_answer"
-            });
-            await maybeGenerateConversationTitle({
-              conversationId,
-              userMessage,
-              assistantAnswer: finalAnswer
-            });
-            await extractAndSaveMemory(userMessage, finalAnswer, userMessageId);
-            await touchConversation(conversationId);
-          }
-        } catch (error) {
-          const message =
-            error instanceof Error ? error.message : "Unexpected streaming error.";
-          controller.enqueue(encoder.encode(`\n\nОшибка: ${message}`));
-        } finally {
-          controller.close();
+        for await (const chunk of completion) {
+          const token = chunk.choices[0]?.delta?.content ?? "";
+          if (!token) continue;
+          answer += token;
+          controller.enqueue(encoder.encode(token));
         }
-      }
-    });
 
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/plain; charset=utf-8",
-        "Cache-Control": "no-store"
+        const finalAnswer = answer.trim();
+        if (finalAnswer) {
+          const assistantMessageId = await saveMessage(
+            "assistant",
+            finalAnswer,
+            {
+              reply_to_message_id: userMessageId,
+              document_ids: attachedDocumentIds
+            },
+            conversationId
+          );
+          await linkDocumentsToMessage({
+            messageId: assistantMessageId,
+            documentIds: attachedDocumentIds,
+            relationType: "used_in_answer"
+          });
+          await maybeGenerateConversationTitle({
+            conversationId,
+            userMessage,
+            assistantAnswer: finalAnswer
+          });
+          await extractAndSaveMemory(userMessage, finalAnswer, userMessageId);
+          await touchConversation(conversationId);
+        }
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Unexpected streaming error.";
+        controller.enqueue(encoder.encode(`\n\nОшибка: ${message}`));
+      } finally {
+        controller.close();
       }
-    });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unexpected chat pipeline error.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+    }
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/plain; charset=utf-8",
+      "Cache-Control": "no-store, no-transform",
+      "X-Accel-Buffering": "no"
+    }
+  });
 }
 
 async function extractAndSaveMemory(

@@ -1,11 +1,11 @@
 {
-  "name": "Second Brain",
-  "short_name": "Brain",
-  "description": "A personal memory chat PWA.",
+  "name": "TBrain",
+  "short_name": "TBrain",
+  "description": "Умный чат с личной памятью.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f7f7f4",
-  "theme_color": "#f7f7f4",
+  "background_color": "#000000",
+  "theme_color": "#FFDD2D",
   "orientation": "portrait",
   "icons": [
     {

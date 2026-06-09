@@ -10,7 +10,7 @@ import { getOpenAI, imageModel } from "@/lib/openai";
 import { saveMessage } from "@/lib/memory";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 export async function POST(request: Request) {
   try {
@@ -65,38 +65,50 @@ export async function POST(request: Request) {
       throw new Error("Image generation returned no image.");
     }
 
-    const document = await storeGeneratedImage({
-      prompt: imagePrompt,
-      imageBytes,
-      sourceDocumentIds
-    });
-
     const imageUrl = `data:image/png;base64,${imageBytes.toString("base64")}`;
-    const answer = "Готово.";
+    let document: Awaited<ReturnType<typeof storeGeneratedImage>> | null = null;
+
+    try {
+      document = await storeGeneratedImage({
+        prompt: imagePrompt,
+        imageBytes,
+        sourceDocumentIds
+      });
+    } catch (storageError) {
+      console.error("Generated image storage failed:", storageError);
+    }
+
+    const answer = document
+      ? "Готово."
+      : "Готово. Картинка создана, но сохранение в облако не удалось.";
 
     const assistantMessageId = await saveMessage(
       "assistant",
       answer,
       {
         reply_to_message_id: userMessageId,
-        generated_document_id: document.id,
+        ...(document ? { generated_document_id: document.id } : {}),
         source_document_ids: sourceDocumentIds,
         intent: inputImages.length > 0 ? "image_edit" : "image_generation"
       },
       conversationId
     );
     await touchConversation(conversationId);
-    await linkDocumentsToMessage({
-      messageId: assistantMessageId,
-      documentIds: [document.id],
-      relationType: "generated_output"
-    });
+
+    if (document) {
+      await linkDocumentsToMessage({
+        messageId: assistantMessageId,
+        documentIds: [document.id],
+        relationType: "generated_output"
+      });
+    }
 
     return NextResponse.json({
       answer,
       imageUrl,
-      documentId: document.id,
-      storagePath: document.storage_path
+      documentId: document?.id ?? null,
+      storagePath: document?.storage_path ?? null,
+      storageSaved: Boolean(document)
     });
   } catch (error) {
     const message =
@@ -118,9 +130,21 @@ async function imageResponseToBuffer(image?: { b64_json?: string; url?: string }
   if (image.b64_json) return Buffer.from(image.b64_json, "base64");
   if (!image.url) return null;
 
-  const response = await fetch(image.url);
-  if (!response.ok) {
-    throw new Error("Could not download generated image.");
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(image.url);
+      if (!response.ok) {
+        throw new Error(`Could not download generated image (${response.status}).`);
+      }
+      return Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+    }
   }
-  return Buffer.from(await response.arrayBuffer());
+
+  throw new Error(
+    lastError instanceof Error ? lastError.message : "Could not download generated image."
+  );
 }

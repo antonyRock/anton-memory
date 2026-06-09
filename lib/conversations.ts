@@ -1,17 +1,31 @@
 import { getDocumentsForMessages } from "@/lib/documents";
 import { getOpenAI, chatModel } from "@/lib/openai";
+import { searchProjects } from "@/lib/projects";
 import { getSupabase } from "@/lib/supabase";
 
 export type Conversation = {
   id: string | number;
   title: string | null;
   summary: string | null;
+  project_id?: string | number | null;
   metadata?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
 
+export type SearchResultItem = {
+  type: string;
+  typeLabel: string;
+  id: string | number;
+  conversationId?: string | number | null;
+  title: string;
+  snippet: string;
+};
+
 const DEFAULT_TITLE = "Новый чат";
+const CONVERSATION_SELECT_WITH_PROJECT =
+  "id, title, summary, metadata, created_at, updated_at, project_id";
+const CONVERSATION_SELECT_BASE = "id, title, summary, metadata, created_at, updated_at";
 const LEGACY_CONVERSATION: Conversation = {
   id: "legacy",
   title: "История",
@@ -21,16 +35,12 @@ const LEGACY_CONVERSATION: Conversation = {
   updated_at: new Date(0).toISOString()
 };
 
-export async function listConversations(search = "") {
+export async function listConversations(search = "", projectId?: string | number | null) {
   const supabase = getSupabase();
   const query = search.trim();
 
   if (!query) {
-    const { data, error } = await supabase
-      .from("conversations")
-      .select("id, title, summary, metadata, created_at, updated_at")
-      .order("updated_at", { ascending: false })
-      .limit(40);
+    const { data, error } = await queryRecentConversations(projectId, 40);
 
     if (isMissingConversationSchema(error?.message)) {
       return { conversations: [LEGACY_CONVERSATION], results: [] };
@@ -44,8 +54,15 @@ export async function listConversations(search = "") {
   }
 
   const pattern = `%${query}%`;
-  const [conversationMatches, messageMatches, documentMatches, factMatches, entityMatches, taskMatches] =
-    await Promise.all([
+  const [
+    conversationMatches,
+    messageMatches,
+    documentMatches,
+    factMatches,
+    entityMatches,
+    taskMatches,
+    projectMatches
+  ] = await Promise.all([
       supabase
         .from("conversations")
         .select("id, title, summary, metadata, created_at, updated_at")
@@ -81,7 +98,8 @@ export async function listConversations(search = "") {
         .select("id, title, description, created_at")
         .or(`title.ilike.${pattern},description.ilike.${pattern}`)
         .order("created_at", { ascending: false })
-        .limit(10)
+        .limit(10),
+      searchProjects(pattern, 10)
     ]);
 
   if (isMissingConversationSchema(conversationMatches.error?.message)) {
@@ -93,7 +111,7 @@ export async function listConversations(search = "") {
         ...toResults("fact", factMatches.data, "content", "fact"),
         ...toResults("entity", entityMatches.data, "description", "name"),
         ...toResults("task", taskMatches.data, "description", "title")
-      ]
+      ] as SearchResultItem[]
     };
   }
 
@@ -125,42 +143,80 @@ export async function listConversations(search = "") {
   );
 
   if (missingIds.length > 0) {
-    const { data } = await supabase
+    const missingWithProject = await supabase
       .from("conversations")
-      .select("id, title, summary, metadata, created_at, updated_at")
+      .select(CONVERSATION_SELECT_WITH_PROJECT)
       .in("id", missingIds)
       .order("updated_at", { ascending: false });
-    conversations.push(...((data ?? []) as Conversation[]));
+
+    const missingResult =
+      missingWithProject.error && /project_id/i.test(missingWithProject.error.message)
+        ? await supabase
+            .from("conversations")
+            .select(CONVERSATION_SELECT_BASE)
+            .in("id", missingIds)
+            .order("updated_at", { ascending: false })
+        : missingWithProject;
+
+    conversations.push(...((missingResult.data ?? []) as Conversation[]));
   }
+
+  const conversationTitleById = new Map(
+    conversations.map((conversation) => [String(conversation.id), conversation.title ?? "Чат"])
+  );
+
+  const results = [
+    ...toResults("conversation", conversationMatches.data, "summary", "title"),
+    ...toResults("message", messageMatches.data, "content"),
+    ...toResults(
+      "document",
+      documentMatches.data,
+      "extracted_text",
+      "file_name",
+      documentConversationIds
+    ),
+    ...toResults("fact", factMatches.data, "content", "fact"),
+    ...toResults("entity", entityMatches.data, "description", "name"),
+    ...toResults("task", taskMatches.data, "description", "title"),
+    ...toResults("project", projectMatches, "description", "title")
+  ].map((result) => {
+    if (result.type !== "message" || !result.conversationId) return result;
+    const chatTitle = conversationTitleById.get(String(result.conversationId));
+    return chatTitle ? { ...result, snippet: `Чат: ${chatTitle}` } : result;
+  }) as SearchResultItem[];
 
   return {
     conversations: conversations
       .sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)))
       .slice(0, 40),
-    results: [
-      ...toResults("conversation", conversationMatches.data, "summary", "title"),
-      ...toResults("message", messageMatches.data, "content"),
-      ...toResults(
-        "document",
-        documentMatches.data,
-        "extracted_text",
-        "file_name",
-        documentConversationIds
-      ),
-      ...toResults("fact", factMatches.data, "content", "fact"),
-      ...toResults("entity", entityMatches.data, "description", "name"),
-      ...toResults("task", taskMatches.data, "description", "title")
-    ]
+    results
   };
 }
 
-export async function createConversation(title = DEFAULT_TITLE) {
+export async function createConversation(
+  title = DEFAULT_TITLE,
+  projectId?: string | number | null
+) {
   const supabase = getSupabase();
-  const { data, error } = await supabase
+  const basePayload: Record<string, unknown> = { title };
+  const payload =
+    projectId != null && projectId !== ""
+      ? { ...basePayload, project_id: projectId }
+      : basePayload;
+
+  let { data, error } = await supabase
     .from("conversations")
-    .insert({ title })
-    .select("id, title, summary, metadata, created_at, updated_at")
+    .insert(payload)
+    .select(CONVERSATION_SELECT_BASE)
     .single();
+
+  if (error && projectId != null && /project_id/i.test(error.message)) {
+    ({ data, error } = await supabase
+      .from("conversations")
+      .insert(basePayload)
+      .select(CONVERSATION_SELECT_BASE)
+      .single());
+  }
 
   if (isMissingConversationSchema(error?.message)) return LEGACY_CONVERSATION;
   if (error) throw new Error(`Could not create conversation: ${error.message}`);
@@ -189,10 +245,18 @@ export async function getConversationMessages(conversationId: string | number) {
   const messages = data ?? [];
   const documentsByMessage = await getDocumentsForMessages(messages);
 
-  return messages.map((message) => ({
-    ...message,
-    attachments: documentsByMessage.get(String(message.id)) ?? []
-  }));
+  return messages.map((message) => {
+    const attachments = documentsByMessage.get(String(message.id)) ?? [];
+    const generatedImage = attachments.find(
+      (attachment) => attachment.metadata?.kind === "generated_image"
+    );
+
+    return {
+      ...message,
+      attachments,
+      imageUrl: generatedImage?.previewUrl ?? generatedImage?.fullUrl ?? null
+    };
+  });
 }
 
 export async function getShortTermContext(conversationId?: string | number) {
@@ -261,31 +325,126 @@ export async function maybeGenerateConversationTitle(input: {
 }
 
 function isMissingConversationSchema(message?: string) {
-  return Boolean(
-    message &&
-      (/conversations/i.test(message) ||
-        /conversation_id/i.test(message) ||
-        /schema cache/i.test(message))
+  if (!message) return false;
+  if (/project_id/i.test(message)) return false;
+  return (
+    /relation .*conversations.* does not exist/i.test(message) ||
+    /could not find the table .*conversations/i.test(message) ||
+    /table .*conversations.* does not exist/i.test(message) ||
+    /schema cache.*conversations/i.test(message)
   );
+}
+
+async function queryRecentConversations(
+  projectId?: string | number | null,
+  limit = 40
+) {
+  const supabase = getSupabase();
+
+  if (!projectId) {
+    const withProject = await supabase
+      .from("conversations")
+      .select(CONVERSATION_SELECT_WITH_PROJECT)
+      .order("updated_at", { ascending: false })
+      .limit(limit);
+
+    if (!withProject.error || !/project_id/i.test(withProject.error.message)) {
+      return withProject;
+    }
+
+    return supabase
+      .from("conversations")
+      .select(CONVERSATION_SELECT_BASE)
+      .order("updated_at", { ascending: false })
+      .limit(limit);
+  }
+
+  let request = supabase
+    .from("conversations")
+    .select(CONVERSATION_SELECT_WITH_PROJECT)
+    .eq("project_id", projectId)
+    .order("updated_at", { ascending: false })
+    .limit(limit);
+
+  const primary = await request;
+  if (!primary.error || !/project_id/i.test(primary.error.message)) {
+    return primary;
+  }
+
+  return supabase
+    .from("conversations")
+    .select(CONVERSATION_SELECT_BASE)
+    .order("updated_at", { ascending: false })
+    .limit(limit);
 }
 
 function toResults(
   type: string,
   rows: Record<string, unknown>[] | null,
   textKey: string,
-  fallbackKey?: string,
+  nameKey?: string,
   conversationIdsByRowId?: Map<string, string | number | null>
-) {
-  return (rows ?? []).map((row) => ({
-    type,
-    id: row.id ?? row.conversation_id ?? crypto.randomUUID(),
-    conversationId:
-      row.conversation_id ??
+): SearchResultItem[] {
+  return (rows ?? []).map((row) => {
+    const resolvedType = resolveResultType(type, row);
+    const typeLabel = resultTypeLabel(resolvedType);
+    const textValue = String(row[textKey] ?? "").trim();
+    const nameValue = nameKey ? String(row[nameKey] ?? "").trim() : "";
+
+    let title = nameValue;
+    let snippet = textValue;
+
+    if (resolvedType === "message") {
+      title = textValue.slice(0, 120) || "Сообщение";
+      snippet = "";
+    } else if (resolvedType === "conversation") {
+      title = nameValue || "Чат";
+      snippet = textValue;
+    } else if (resolvedType === "entity") {
+      title = nameValue || "Сущность";
+      snippet = textValue;
+    } else if (resolvedType === "fact") {
+      title = nameValue || textValue.slice(0, 120) || "Факт";
+      snippet = nameValue && textValue && nameValue !== textValue ? textValue : "";
+    } else if (resolvedType === "task") {
+      title = nameValue || "Задача";
+      snippet = textValue;
+    } else if (resolvedType === "project") {
+      title = nameValue || "Проект";
+      snippet = textValue;
+    } else if (resolvedType === "image" || resolvedType === "document") {
+      title = nameValue || "Файл";
+      snippet = textValue.slice(0, 180);
+    }
+
+    const conversationId =
+      (row.conversation_id as string | number | null | undefined) ??
       conversationIdsByRowId?.get(String(row.id ?? "")) ??
-      (type === "conversation" ? row.id : null),
-    title: fallbackKey ? String(row[fallbackKey] ?? type) : resultTypeLabel(type),
-    snippet: String(row[textKey] ?? row[fallbackKey ?? ""] ?? "").slice(0, 180)
-  }));
+      (resolvedType === "conversation" ? (row.id as string | number) : null);
+
+    return {
+      type: resolvedType,
+      typeLabel,
+      id: (row.id ?? row.conversation_id ?? crypto.randomUUID()) as string | number,
+      conversationId,
+      title,
+      snippet: snippet.slice(0, 180)
+    };
+  });
+}
+
+function resolveResultType(type: string, row: Record<string, unknown>) {
+  if (type !== "document") return type;
+  const fileType = String(row.file_type ?? "");
+  const metadata = (row.metadata ?? {}) as Record<string, unknown>;
+  if (
+    fileType.startsWith("image/") ||
+    metadata.kind === "image" ||
+    metadata.kind === "generated_image"
+  ) {
+    return "image";
+  }
+  return "document";
 }
 
 async function getConversationIdsForDocuments(documentIds: Array<string | number>) {
@@ -322,9 +481,12 @@ async function getConversationIdsForDocuments(documentIds: Array<string | number
 
 function resultTypeLabel(type: string) {
   if (type === "message") return "Сообщение";
+  if (type === "conversation") return "Чат";
   if (type === "document") return "Файл";
+  if (type === "image") return "Изображение";
   if (type === "fact") return "Факт";
   if (type === "entity") return "Сущность";
   if (type === "task") return "Задача";
-  return "Чат";
+  if (type === "project") return "Проект";
+  return "Результат";
 }

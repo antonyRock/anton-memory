@@ -7,9 +7,19 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type DragEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent,
   type ReactNode
 } from "react";
+import { SidebarMoreMenu } from "@/components/SidebarMoreMenu";
+import { ProjectFolderList } from "@/components/ProjectFolderList";
+import { ChatContextMenu } from "@/components/ChatContextMenu";
+import { ObsidianBackground } from "@/components/ObsidianBackground";
+import {
+  ThinkingIndicator,
+  type ThinkingPhase
+} from "@/components/ThinkingIndicator";
 import {
   Check,
   ChevronDown,
@@ -23,16 +33,16 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
-  Plus,
   Search,
   Send,
-  Settings,
   Square,
-  X
+  X,
+  Zap
 } from "lucide-react";
 
 type FileAttachment = {
   id?: string | number;
+  batchId?: string;
   fileName: string;
   fileType: string;
   fileSize: number;
@@ -55,17 +65,29 @@ type Conversation = {
   id: string | number;
   title: string | null;
   summary: string | null;
+  project_id?: string | number | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type Project = {
+  id: string | number;
+  title: string;
+  description: string | null;
   created_at: string;
   updated_at: string;
 };
 
 type SearchResult = {
   type: string;
+  typeLabel: string;
   id: string | number;
   conversationId?: string | number | null;
   title: string;
   snippet: string;
 };
+
+type LibraryView = "files" | "images" | "settings" | null;
 
 const DEFAULT_CHAT_TITLE = "Новый чат";
 const MIN_SIDEBAR_WIDTH = 240;
@@ -75,10 +97,25 @@ const DEFAULT_SIDEBAR_WIDTH = 280;
 export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [expandedProjectIds, setExpandedProjectIds] = useState<Record<string, boolean>>({});
+  const [openMenuProjectId, setOpenMenuProjectId] = useState<string | number | null>(null);
+  const [draggingConversationId, setDraggingConversationId] = useState<string | number | null>(
+    null
+  );
+  const [dropTargetProjectId, setDropTargetProjectId] = useState<string | "general" | null>(null);
+  const [chatContextMenu, setChatContextMenu] = useState<{
+    conversationId: string | number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [projectsCollapsed, setProjectsCollapsed] = useState(false);
+  const [libraryView, setLibraryView] = useState<LibraryView>(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const dragDepthRef = useRef(0);
   const [activeConversationId, setActiveConversationId] = useState<string | number | null>(null);
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [search, setSearch] = useState("");
-  const [searchOpen, setSearchOpen] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [recentCollapsed, setRecentCollapsed] = useState(false);
@@ -87,6 +124,9 @@ export default function Home() {
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [activityPhase, setActivityPhase] = useState<ThinkingPhase | null>(null);
+  const [streamingAssistantText, setStreamingAssistantText] = useState<string | null>(null);
   const [isRecording, setIsRecording] = useState(false);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [previewImage, setPreviewImage] = useState<FileAttachment | null>(null);
@@ -102,21 +142,48 @@ export default function Home() {
   const pendingResetScrollRef = useRef(false);
   const resizingSidebarRef = useRef(false);
   const hasMessages = messages.length > 0;
-  const showThinking = isLoading && messages[messages.length - 1]?.role !== "assistant";
+  const isUploadingFiles = attachments.some((file) => file.status === "uploading");
+  const showChatIndicator =
+    isLoading &&
+    (streamingAssistantText === null || streamingAssistantText.length === 0);
+  const showCompactIndicator = isUploadingFiles || isTranscribing;
   const matchCount = countMatchesInMessages(messages, highlightTerm);
+  const bootstrappedRef = useRef(false);
+  const generalConversations = conversations.filter((conversation) => !conversation.project_id);
+
+  useLayoutEffect(() => {
+    window.localStorage.removeItem("activeConversationId");
+    setActiveConversationId(null);
+    setMessages([]);
+    pendingResetScrollRef.current = true;
+  }, []);
 
   useEffect(() => {
+    navigator.serviceWorker?.getRegistrations().then((registrations) => {
+      registrations.forEach((registration) => {
+        void registration.update();
+      });
+    });
     navigator.serviceWorker?.register("/sw.js").catch(() => undefined);
     setSidebarCollapsed(window.localStorage.getItem("sidebarCollapsed") === "true");
     setRecentCollapsed(window.localStorage.getItem("recentCollapsed") === "true");
+    const savedExpanded = window.localStorage.getItem("expandedProjectIds");
+    if (savedExpanded) {
+      try {
+        setExpandedProjectIds(JSON.parse(savedExpanded) as Record<string, boolean>);
+      } catch {
+        setExpandedProjectIds({});
+      }
+    }
     const savedWidth = Number(window.localStorage.getItem("sidebarWidth"));
     if (Number.isFinite(savedWidth)) setSidebarWidth(clampSidebarWidth(savedWidth));
     void bootstrap();
   }, []);
 
   useEffect(() => {
+    if (!bootstrappedRef.current) return;
     const handle = window.setTimeout(() => {
-      void loadConversations(search);
+      void loadSearchResults(search);
     }, 250);
     return () => window.clearTimeout(handle);
   }, [search]);
@@ -130,7 +197,7 @@ export default function Home() {
   useEffect(() => {
     if (!shouldAutoScrollRef.current) return;
     endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isLoading]);
+  }, [messages, isLoading, streamingAssistantText]);
 
   useLayoutEffect(() => {
     if (!pendingResetScrollRef.current) return;
@@ -153,6 +220,10 @@ export default function Home() {
   }, [sidebarCollapsed]);
 
   useEffect(() => {
+    window.localStorage.setItem("expandedProjectIds", JSON.stringify(expandedProjectIds));
+  }, [expandedProjectIds]);
+
+  useEffect(() => {
     window.localStorage.setItem("recentCollapsed", String(recentCollapsed));
   }, [recentCollapsed]);
 
@@ -167,20 +238,232 @@ export default function Home() {
   }, [activeMatchIndex, matchCount]);
 
   async function bootstrap() {
-    await loadConversations("");
     resetToNewChat();
+    bootstrappedRef.current = true;
+    await Promise.all([loadRecentConversations(), loadProjects()]);
   }
 
-  async function loadConversations(query = search) {
+  async function loadProjects() {
     try {
-      const response = await fetch(`/api/conversations?search=${encodeURIComponent(query)}`);
+      const response = await fetch("/api/projects");
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить проекты");
+      setProjects(data.projects ?? []);
+    } catch {
+      setProjects([]);
+    }
+  }
+
+  async function createProject(options?: {
+    title?: string;
+    promptDefault?: string;
+    conversationId?: string | number;
+  }) {
+    const title =
+      options?.title?.trim() ||
+      window.prompt("Название проекта", options?.promptDefault ?? "Новый проект")?.trim();
+    if (!title) return null;
+
+    try {
+      const response = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось создать проект");
+      const project = data.project as Project;
+      setProjects((current) => [project, ...current]);
+      setExpandedProjectIds((current) => ({ ...current, [String(project.id)]: true }));
+      setProjectsCollapsed(false);
+
+      if (options?.conversationId != null) {
+        await moveConversationToProject(options.conversationId, project.id);
+      }
+
+      setSidebarOpen(false);
+      return project;
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось создать проект");
+      return null;
+    }
+  }
+
+  function openChatContextMenu(event: ReactMouseEvent, conversationId: string | number) {
+    event.preventDefault();
+    event.stopPropagation();
+    setChatContextMenu({
+      conversationId,
+      x: event.clientX,
+      y: event.clientY
+    });
+  }
+
+  function createProjectFromChat(conversationId: string | number) {
+    const conversation = conversations.find(
+      (item) => String(item.id) === String(conversationId)
+    );
+    const list = conversation?.project_id
+      ? conversations.filter((item) => String(item.project_id) === String(conversation.project_id))
+      : generalConversations;
+    const index = list.findIndex((item) => String(item.id) === String(conversationId));
+    const titled = conversation
+      ? conversationTitle(conversation, list, Math.max(index, 0))
+      : "Новый проект";
+    const promptDefault = titled === DEFAULT_CHAT_TITLE ? "Новый проект" : titled;
+    void createProject({ promptDefault, conversationId });
+  }
+
+  function getUploadProjectId() {
+    const activeConversation = conversations.find(
+      (conversation) => String(conversation.id) === String(activeConversationId)
+    );
+    return activeConversation?.project_id ?? null;
+  }
+
+  function toggleProject(projectId: string | number) {
+    const key = String(projectId);
+    setExpandedProjectIds((current) => ({ ...current, [key]: !current[key] }));
+  }
+
+  async function renameProject(projectId: string | number, title: string) {
+    const project = projects.find((item) => String(item.id) === String(projectId));
+    const trimmed = title.trim();
+    if (!trimmed || trimmed === project?.title) {
+      setOpenMenuProjectId(null);
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: trimmed })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось переименовать проект");
+      setProjects((current) =>
+        current.map((item) => (String(item.id) === String(projectId) ? (data.project as Project) : item))
+      );
+      setOpenMenuProjectId(null);
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось переименовать проект");
+    }
+  }
+
+  async function deleteProjectById(projectId: string | number) {
+    const project = projects.find((item) => String(item.id) === String(projectId));
+    if (
+      !window.confirm(
+        `Удалить проект «${project?.title ?? "Без названия"}»? Чаты останутся в общем списке.`
+      )
+    ) {
+      setOpenMenuProjectId(null);
+      return;
+    }
+
+    try {
+      const response = await fetch(`/api/projects/${projectId}`, { method: "DELETE" });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось удалить проект");
+      setProjects((current) => current.filter((item) => String(item.id) !== String(projectId)));
+      setConversations((current) =>
+        current.map((conversation) =>
+          String(conversation.project_id) === String(projectId)
+            ? { ...conversation, project_id: null }
+            : conversation
+        )
+      );
+      setExpandedProjectIds((current) => {
+        const next = { ...current };
+        delete next[String(projectId)];
+        return next;
+      });
+      setOpenMenuProjectId(null);
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось удалить проект");
+    }
+  }
+
+  async function moveConversationToProject(
+    conversationId: string | number,
+    projectId: string | number | null
+  ) {
+    try {
+      const response = await fetch(`/api/conversations/${conversationId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось переместить чат");
+
+      const updated = data.conversation as Conversation;
+      setConversations((current) =>
+        current.map((conversation) =>
+          String(conversation.id) === String(conversationId) ? { ...conversation, ...updated } : conversation
+        )
+      );
+
+      if (projectId != null) {
+        setExpandedProjectIds((current) => ({ ...current, [String(projectId)]: true }));
+      }
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось переместить чат");
+    } finally {
+      setDraggingConversationId(null);
+      setDropTargetProjectId(null);
+    }
+  }
+
+  function handleConversationDragStart(conversationId: string | number) {
+    setDraggingConversationId(conversationId);
+  }
+
+  function handleConversationDragEnd() {
+    setDraggingConversationId(null);
+    setDropTargetProjectId(null);
+  }
+
+  function expandProjectFromSearch(projectId: string | number) {
+    setExpandedProjectIds((current) => ({ ...current, [String(projectId)]: true }));
+    setProjectsCollapsed(false);
+    setSidebarOpen(true);
+  }
+
+  async function loadRecentConversations() {
+    try {
+      const response = await fetch("/api/conversations?search=");
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить историю");
-      setConversations(data.conversations ?? []);
-      setSearchResults(data.results ?? []);
+      setConversations(
+        (data.conversations ?? []).filter(
+          (conversation: Conversation) => String(conversation.id) !== "legacy"
+        )
+      );
       return (data.conversations ?? []) as Conversation[];
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Не удалось загрузить историю");
+      return [];
+    }
+  }
+
+  async function loadSearchResults(query = search) {
+    const trimmed = query.trim();
+    if (!trimmed) {
+      setSearchResults([]);
+      return [];
+    }
+
+    try {
+      const response = await fetch(`/api/conversations?search=${encodeURIComponent(trimmed)}`);
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось выполнить поиск");
+      setSearchResults(data.results ?? []);
+      return (data.results ?? []) as SearchResult[];
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось выполнить поиск");
+      setSearchResults([]);
       return [];
     }
   }
@@ -199,10 +482,12 @@ export default function Home() {
             role: "user" | "assistant";
             content: string;
             attachments?: FileAttachment[];
+            imageUrl?: string | null;
           }) => ({
             role: message.role,
             content: message.content,
-            attachments: message.attachments ?? []
+            attachments: message.attachments ?? [],
+            imageUrl: message.imageUrl ?? undefined
           })
         )
       );
@@ -222,17 +507,26 @@ export default function Home() {
     setInput("");
     setAttachments([]);
     setSearch("");
+    setSearchResults([]);
     setSidebarOpen(false);
+    setLibraryView(null);
     setNote(DEFAULT_CHAT_TITLE);
     window.localStorage.removeItem("activeConversationId");
   }
 
   async function createConversation() {
     try {
-      const response = await fetch("/api/conversations", { method: "POST" });
+      const response = await fetch("/api/conversations", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось создать чат");
       const conversation = data.conversation as Conversation;
+      if (String(conversation.id) === "legacy") {
+        throw new Error("Не удалось создать чат");
+      }
       setConversations((current) => [
         conversation,
         ...current.filter((item) => String(item.id) !== String(conversation.id))
@@ -247,13 +541,50 @@ export default function Home() {
   }
 
   function openConversation(conversationId: string | number | null | undefined) {
-    if (!conversationId) return;
+    if (!conversationId || String(conversationId) === "legacy") return;
     shouldAutoScrollRef.current = false;
     pendingResetScrollRef.current = true;
     resetMessagesScroll();
     setActiveConversationId(conversationId);
+    setLibraryView(null);
     window.localStorage.setItem("activeConversationId", String(conversationId));
     void loadMessages(conversationId);
+  }
+
+  function clearSearch() {
+    setSearch("");
+    setSearchResults([]);
+    setHighlightTerm("");
+    setActiveMatchIndex(0);
+  }
+
+  function handleDragEnter(event: DragEvent) {
+    event.preventDefault();
+    dragDepthRef.current += 1;
+    if (event.dataTransfer.types.includes("Files")) setIsDragOver(true);
+  }
+
+  function handleDragLeave(event: DragEvent) {
+    event.preventDefault();
+    dragDepthRef.current -= 1;
+    if (dragDepthRef.current <= 0) {
+      dragDepthRef.current = 0;
+      setIsDragOver(false);
+    }
+  }
+
+  function handleDragOver(event: DragEvent) {
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function handleDrop(event: DragEvent) {
+    event.preventDefault();
+    dragDepthRef.current = 0;
+    setIsDragOver(false);
+    if (event.dataTransfer.files?.length) {
+      void onFilesSelected(event.dataTransfer.files);
+    }
   }
 
   function resetMessagesScroll() {
@@ -277,7 +608,17 @@ export default function Home() {
       setHighlightTerm(term);
       setActiveMatchIndex(0);
     }
-    openConversation(result.conversationId);
+    if (result.type === "project") {
+      expandProjectFromSearch(result.id);
+      return;
+    }
+    if (result.conversationId) {
+      openConversation(result.conversationId);
+      return;
+    }
+    if (result.type === "conversation") {
+      openConversation(result.id);
+    }
   }
 
   function clearSearchHighlight() {
@@ -324,9 +665,14 @@ export default function Home() {
       return;
     }
 
+    setLibraryView(null);
+
     let conversationId = activeConversationId;
     if (!conversationId) conversationId = await createConversation();
-    if (!conversationId) return;
+    if (!conversationId) {
+      setNote("Не удалось создать чат. Проверьте подключение к Supabase.");
+      return;
+    }
 
     const readyFiles = files.filter((file) => file.status === "ready" && file.id);
     const readyDocumentIds = readyFiles.map((file) => file.id);
@@ -338,12 +684,17 @@ export default function Home() {
     shouldAutoScrollRef.current = true;
     setMessages((current) => [
       ...current,
-      { role: "user", content: displayText, attachments: readyFiles }
+      { role: "user", content: displayText, attachments: readyFiles },
+      ...(imageIntent ? [] : [{ role: "assistant" as const, content: "" }])
     ]);
+    if (!imageIntent) {
+      setStreamingAssistantText("");
+    }
     setInput("");
     setAttachments([]);
     setIsLoading(true);
-    setNote(imageIntent ? "Работаю с изображением" : "Формулирую ответ");
+    setActivityPhase(imageIntent ? "image" : "thinking");
+    setNote("Готово");
 
     try {
       const response = await fetch(imageIntent ? "/api/images" : "/api/chat", {
@@ -366,28 +717,52 @@ export default function Home() {
         const data = await response.json();
         setMessages((current) => [
           ...current,
-          { role: "assistant", content: data.answer, imageUrl: data.imageUrl }
+          {
+            role: "assistant",
+            content: data.answer,
+            imageUrl: data.imageUrl,
+            attachments: data.documentId
+              ? [
+                  {
+                    id: data.documentId,
+                    fileName: "generated.png",
+                    fileType: "image/png",
+                    fileSize: 0,
+                    previewUrl: data.imageUrl,
+                    fullUrl: data.imageUrl,
+                    metadata: { kind: "generated_image" }
+                  }
+                ]
+              : undefined
+          }
         ]);
       } else {
         await streamAssistantMessage(response);
       }
 
       setNote("Готово");
-      void loadConversations(search);
+      void loadRecentConversations();
     } catch (error) {
-      setMessages((current) => [
-        ...current,
-        {
-          role: "assistant",
-          content:
-            error instanceof Error
-              ? `Ошибка: ${error.message}`
-              : "Ошибка: не удалось обработать сообщение."
-        }
-      ]);
+      setStreamingAssistantText(null);
+      setMessages((current) => {
+        const last = current[current.length - 1];
+        const withoutEmptyAssistant =
+          last?.role === "assistant" && !last.content ? current.slice(0, -1) : current;
+        return [
+          ...withoutEmptyAssistant,
+          {
+            role: "assistant",
+            content:
+              error instanceof Error
+                ? `Ошибка: ${error.message}`
+                : "Ошибка: не удалось обработать сообщение."
+          }
+        ];
+      });
       setNote("Нужна проверка настроек");
     } finally {
       setIsLoading(false);
+      setStreamingAssistantText(null);
     }
   }
 
@@ -398,21 +773,22 @@ export default function Home() {
     const decoder = new TextDecoder();
     let fullText = "";
 
-    setMessages((current) => [...current, { role: "assistant", content: "" }]);
-
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
       fullText += decoder.decode(value, { stream: true });
-      setMessages((current) => replaceLastAssistantMessage(current, fullText));
+      setStreamingAssistantText(fullText);
     }
 
     const trailing = decoder.decode();
     if (trailing) {
       fullText += trailing;
-      setMessages((current) => replaceLastAssistantMessage(current, fullText));
+      setStreamingAssistantText(fullText);
     }
+
+    setMessages((current) => replaceLastAssistantMessage(current, fullText));
+    setStreamingAssistantText(null);
   }
 
   async function readError(response: Response) {
@@ -463,7 +839,8 @@ export default function Home() {
           return;
         }
 
-        setNote("Расшифровываю голос");
+        setIsTranscribing(true);
+        setActivityPhase("transcription");
 
         const blob = new Blob(chunksRef.current, {
           type: recorder.mimeType || "audio/webm"
@@ -493,6 +870,8 @@ export default function Home() {
               ? `Ошибка распознавания: ${error.message}`
               : "Ошибка распознавания"
           );
+        } finally {
+          setIsTranscribing(false);
         }
       };
 
@@ -509,7 +888,15 @@ export default function Home() {
   async function onFilesSelected(fileList: FileList | null) {
     if (!fileList?.length) return;
     const selectedFiles = Array.from(fileList);
+    const tooLarge = selectedFiles.find((file) => file.size > 4.5 * 1024 * 1024);
+    if (tooLarge) {
+      setNote(`Файл «${tooLarge.name}» слишком большой. Максимум 4.5 МБ.`);
+      return;
+    }
+
+    const batchId = crypto.randomUUID();
     const pendingAttachments: FileAttachment[] = selectedFiles.map((file) => ({
+      batchId,
       fileName: file.name,
       fileType: file.type || inferClientFileType(file.name),
       fileSize: file.size,
@@ -518,38 +905,58 @@ export default function Home() {
 
     setAttachments((current) => [...current, ...pendingAttachments]);
     if (fileInputRef.current) fileInputRef.current.value = "";
-    setNote(selectedFiles.length > 1 ? "Загружаю файлы" : "Загружаю файл");
+    setActivityPhase("file");
+    setNote(selectedFiles.length > 1 ? "Загружаю файлы..." : "Загружаю файл...");
 
     const formData = new FormData();
     selectedFiles.forEach((file) => formData.append("files", file));
+    const uploadProjectId = getUploadProjectId();
+    if (uploadProjectId) formData.append("projectId", String(uploadProjectId));
 
     try {
       const response = await fetch("/api/files", {
         method: "POST",
         body: formData
       });
-      const data = await response.json();
+      let data: { documents?: FileAttachment[]; error?: string };
+      try {
+        data = await response.json();
+      } catch {
+        throw new Error("Сервер вернул некорректный ответ. Обновите страницу и попробуйте снова.");
+      }
       if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить файл");
+      if (!data.documents?.length) {
+        throw new Error("Сервер не вернул данные файла. Попробуйте ещё раз.");
+      }
 
       setAttachments((current) => {
-        const next = [...current];
-        const start = next.length - pendingAttachments.length;
-        data.documents.forEach((document: FileAttachment, index: number) => {
-          next[start + index] = { ...document, status: "ready" };
+        let documentIndex = 0;
+        return current.map((attachment) => {
+          if (attachment.batchId !== batchId) return attachment;
+          const document = data.documents?.[documentIndex++];
+          if (!document?.id) {
+            return {
+              ...attachment,
+              status: "error",
+              error: "Не удалось получить данные загруженного файла"
+            };
+          }
+          return { ...document, batchId, status: "ready" };
         });
-        return next;
       });
       setNote(selectedFiles.length > 1 ? "Файлы готовы" : "Файл готов");
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Ошибка загрузки файла";
+      const message = formatUploadError(error);
       setAttachments((current) =>
         current.map((attachment) =>
-          attachment.status === "uploading"
+          attachment.batchId === batchId
             ? { ...attachment, status: "error", error: message }
             : attachment
         )
       );
       setNote(message);
+    } finally {
+      setActivityPhase((current) => (current === "file" ? null : current));
     }
   }
 
@@ -574,7 +981,9 @@ export default function Home() {
       <aside className="sidebar">
         <div className="sidebar-fixed">
           <div className="sidebar-header">
-            <div className="sidebar-brand">Второй мозг</div>
+            <div className="sidebar-brand">
+              <span className="brand-accent">T</span>Brain
+            </div>
             <button
               aria-label="Скрыть sidebar"
               className="sidebar-close"
@@ -592,70 +1001,147 @@ export default function Home() {
           </div>
 
           <div className="sidebar-actions">
-            <button className="sidebar-action" onClick={resetToNewChat} type="button">
-              <Plus size={18} />
+            <button className="sidebar-action sidebar-action-new-chat" onClick={resetToNewChat} type="button">
+              <span aria-hidden className="sidebar-action-icon-wrap">
+                <Zap size={16} strokeWidth={1.5} />
+              </span>
               Новый чат
             </button>
-            <button
-              className="sidebar-action"
-              onClick={() => setSearchOpen(true)}
-              type="button"
-            >
-              <Search size={18} />
-              Искать чаты
-            </button>
-            <button className="sidebar-action" type="button">
-              <Paperclip size={18} />
-              Библиотека / Файлы
-            </button>
-            <button className="sidebar-action" type="button">
-              <Settings size={18} />
-              Настройки
-            </button>
-          </div>
 
-          {searchOpen ? (
             <label className="search-box">
               <Search size={17} />
               <input
                 aria-label="Поиск"
-                autoFocus
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Поиск по чатам и памяти"
+                placeholder="Поиск"
                 value={search}
               />
+              {search ? (
+                <button
+                  aria-label="Очистить поиск"
+                  className="search-clear"
+                  onClick={clearSearch}
+                  type="button"
+                >
+                  <X size={15} />
+                </button>
+              ) : null}
             </label>
-          ) : null}
+
+            <SidebarMoreMenu
+              onFiles={() => {
+                setLibraryView("files");
+                resetToNewChat();
+              }}
+              onImages={() => {
+                setLibraryView("images");
+                resetToNewChat();
+              }}
+              onSettings={() => {
+                setLibraryView("settings");
+              }}
+            />
+          </div>
+
+          <div aria-hidden="true" className="sidebar-divider" />
         </div>
 
         <div className="sidebar-scroll">
           <button
             className="sidebar-section-toggle"
-            onClick={() => setRecentCollapsed((current) => !current)}
+            onClick={() => setProjectsCollapsed((current) => !current)}
             type="button"
           >
-            {recentCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
-            Недавние
+            {projectsCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+            Проекты
           </button>
 
-          {!recentCollapsed ? (
-            <nav className="conversation-list">
-              {conversations.map((conversation, index) => (
-                <button
-                  className={`conversation-item ${
-                    String(conversation.id) === String(activeConversationId) ? "active" : ""
-                  }`}
-                  key={conversation.id}
-                  onClick={() => openConversation(conversation.id)}
-                  type="button"
-                >
-                  <span>{conversationTitle(conversation, conversations, index)}</span>
-                </button>
-              ))}
-            </nav>
+          {!projectsCollapsed ? (
+            <ProjectFolderList
+              activeConversationId={activeConversationId}
+              conversations={conversations}
+              conversationTitle={conversationTitle}
+              draggingConversationId={draggingConversationId}
+              dropTargetProjectId={dropTargetProjectId}
+              expandedProjectIds={expandedProjectIds}
+              onCloseMenu={() => setOpenMenuProjectId(null)}
+              onCreateProject={() => void createProject()}
+              onConversationContextMenu={openChatContextMenu}
+              onDeleteProject={(projectId) => void deleteProjectById(projectId)}
+              onDragConversationEnd={handleConversationDragEnd}
+              onDragConversationStart={handleConversationDragStart}
+              onDragOverProject={(projectId) => setDropTargetProjectId(String(projectId))}
+              onDropOnProject={(projectId) => {
+                if (draggingConversationId != null) {
+                  void moveConversationToProject(draggingConversationId, projectId);
+                }
+              }}
+              onOpenConversation={openConversation}
+              onOpenMenu={setOpenMenuProjectId}
+              onRenameProject={(projectId, title) => void renameProject(projectId, title)}
+              onToggleProject={toggleProject}
+              openMenuProjectId={openMenuProjectId}
+              projects={projects}
+            />
           ) : null}
 
-          {search.trim() && searchResults.length > 0 ? (
+          {!search.trim() ? (
+            <>
+              <div aria-hidden="true" className="sidebar-divider sidebar-divider-scroll" />
+              <button
+                className="sidebar-section-toggle"
+                onClick={() => setRecentCollapsed((current) => !current)}
+                type="button"
+              >
+                {recentCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                Недавние
+              </button>
+
+              {!recentCollapsed ? (
+                <nav
+                  className={`conversation-list ${
+                    dropTargetProjectId === "general" ? "is-drop-target" : ""
+                  }`}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    if (draggingConversationId != null) setDropTargetProjectId("general");
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (draggingConversationId != null) {
+                      void moveConversationToProject(draggingConversationId, null);
+                    }
+                  }}
+                >
+                  {generalConversations.length ? (
+                    generalConversations.map((conversation, index) => (
+                      <button
+                        className={`conversation-item ${
+                          String(conversation.id) === String(activeConversationId) ? "active" : ""
+                        } ${String(draggingConversationId) === String(conversation.id) ? "is-dragging" : ""}`}
+                        draggable
+                        key={conversation.id}
+                        onClick={() => openConversation(conversation.id)}
+                        onContextMenu={(event) => openChatContextMenu(event, conversation.id)}
+                        onDragEnd={handleConversationDragEnd}
+                        onDragStart={() => handleConversationDragStart(conversation.id)}
+                        type="button"
+                      >
+                        <span>
+                          {conversationTitle(conversation, generalConversations, index)}
+                        </span>
+                      </button>
+                    ))
+                  ) : (
+                    <p className="sidebar-empty">Пока нет чатов</p>
+                  )}
+                </nav>
+              ) : null}
+            </>
+          ) : null}
+
+          {search.trim() ? (
+            searchResults.length > 0 ? (
             <div className="search-results">
               <div className="sidebar-section-title">Найдено</div>
               {searchResults.slice(0, 12).map((result) => (
@@ -665,12 +1151,15 @@ export default function Home() {
                   onClick={() => openSearchResult(result)}
                   type="button"
                 >
+                  <span className="search-result-type">{result.typeLabel}</span>
                   <strong>{result.title}</strong>
-                  <span>{result.snippet}</span>
+                  {result.snippet ? <span>{result.snippet}</span> : null}
                 </button>
               ))}
             </div>
-          ) : null}
+          ) : (
+            <div className="search-results-empty">Ничего не найдено</div>
+          )) : null}
         </div>
 
         <div
@@ -691,17 +1180,31 @@ export default function Home() {
         />
       ) : null}
 
-      <section className={`chat-shell ${hasMessages ? "with-messages" : "empty"}`}>
+      <section
+        className={`chat-shell ${hasMessages ? "with-messages" : "empty"}`}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
+        <ObsidianBackground />
+        {isDragOver ? (
+          <div aria-hidden="true" className="drop-overlay">
+            <div className="drop-overlay-card">Отпустите файл для загрузки</div>
+          </div>
+        ) : null}
         <header className="top-bar">
           {/*
           <button
             aria-label="История"
           */}
           <div className="brand">
-            <div className="brand-mark">B</div>
+            <div className="brand-mark">T</div>
             <div className="brand-title">
-              <strong>Второй мозг</strong>
-              <span>ChatGPT-like с личной памятью</span>
+              <strong>
+                <span className="brand-accent">T</span>Brain
+              </strong>
+              <span>Умный чат с личной памятью</span>
             </div>
           </div>
         </header>
@@ -712,50 +1215,89 @@ export default function Home() {
           ref={messagesRef}
           aria-live="polite"
         >
-          {!hasMessages ? (
+          {!hasMessages && libraryView === "settings" ? (
             <div className="empty-state">
               <div>
-                <h1>Рад тебя видеть, Антон.</h1>
+                <h1>Настройки</h1>
+                <p>Раздел настроек скоро появится.</p>
               </div>
             </div>
-          ) : (
-            messages.map((message, index) => (
+          ) : null}
+          {!hasMessages && (libraryView === "files" || libraryView === "images") ? (
+            <div className="empty-state">
+              <div>
+                <h1>{libraryView === "files" ? "Файлы" : "Изображения"}</h1>
+                <p>Откройте проект или загрузите файл в чат, чтобы увидеть материалы здесь.</p>
+              </div>
+            </div>
+          ) : null}
+          {!hasMessages && !libraryView ? (
+            <div className="empty-state">
+              <div>
+                <h1>
+                  Добро пожаловать в <span className="brand-accent">T</span>Brain
+                </h1>
+              </div>
+            </div>
+          ) : null}
+          {hasMessages ? (
+            messages.map((message, index) => {
+              const isStreamingBubble =
+                message.role === "assistant" &&
+                index === messages.length - 1 &&
+                streamingAssistantText !== null;
+              const displayContent = isStreamingBubble
+                ? streamingAssistantText
+                : message.content;
+              const generatedImageUrl = resolveGeneratedImageUrl(message);
+              const visibleAttachments = (message.attachments ?? []).filter(
+                (attachment) => attachment.metadata?.kind !== "generated_image"
+              );
+
+              return (
               <article
                 className={`message-row ${message.role} ${
                   message.attachments?.length ? "has-attachments" : ""
                 }`}
                 key={`${message.role}-${index}`}
               >
-                {message.role === "assistant" ? <div className="avatar">B</div> : null}
+                {message.role === "assistant" ? <div className="avatar avatar-assistant">T</div> : null}
                 <div className="bubble">
-                  {message.content ? (
+                  {displayContent ? (
                     <div>
                       {renderHighlightedText(
-                        message.content,
+                        displayContent,
                         highlightTerm,
                         activeMatchIndex,
                         countMatchesInMessages(messages.slice(0, index), highlightTerm)
                       )}
                     </div>
                   ) : null}
-                  {message.attachments?.length ? (
+                  {visibleAttachments.length ? (
                     <MessageAttachments
-                      attachments={message.attachments}
+                      attachments={visibleAttachments}
                       onPreview={setPreviewImage}
                     />
                   ) : null}
-                  {message.imageUrl ? (
-                    <img className="generated-image" src={message.imageUrl} alt="Generated result" />
+                  {generatedImageUrl ? (
+                    <img
+                      className="generated-image"
+                      src={generatedImageUrl}
+                      alt="Generated result"
+                    />
                   ) : null}
                 </div>
+                {message.role === "user" ? <div className="avatar avatar-user">Я</div> : null}
               </article>
-            ))
-          )}
-          {showThinking ? (
-            <article className="message-row assistant">
-              <div className="avatar">B</div>
-              <div className="bubble">Думаю...</div>
-            </article>
+              );
+            })
+          ) : null}
+          {activityPhase && activityPhase !== "file" && activityPhase !== "transcription" ? (
+            <ThinkingIndicator
+              active={showChatIndicator}
+              layout="message"
+              phase={activityPhase}
+            />
           ) : null}
           <div ref={endRef} />
         </section>
@@ -776,6 +1318,13 @@ export default function Home() {
                 <X size={14} />
               </button>
             </div>
+          ) : null}
+          {activityPhase === "file" || activityPhase === "transcription" ? (
+            <ThinkingIndicator
+              active={showCompactIndicator}
+              layout="compact"
+              phase={activityPhase}
+            />
           ) : null}
           {isRecording ? (
             <div className="recording-pill">
@@ -806,6 +1355,7 @@ export default function Home() {
           ) : null}
           <form className="composer" onSubmit={onSubmit}>
             <input
+              accept=".pdf,.docx,.txt,.md,.csv,.json,.xlsx,.xls,.png,.jpg,.jpeg,.webp"
               ref={fileInputRef}
               className="file-input"
               multiple
@@ -859,7 +1409,9 @@ export default function Home() {
               {isLoading ? <Loader2 className="spin" size={20} /> : <Send size={20} />}
             </button>
           </form>
-          {hasMessages ? <div className="composer-note">{note}</div> : null}
+          {note && note !== "Готово" && !showChatIndicator && !showCompactIndicator ? (
+            <div className="composer-note">{note}</div>
+          ) : null}
         </div>
       </section>
 
@@ -884,6 +1436,15 @@ export default function Home() {
             <div>{previewImage.fileName}</div>
           </div>
         </div>
+      ) : null}
+
+      {chatContextMenu ? (
+        <ChatContextMenu
+          onClose={() => setChatContextMenu(null)}
+          onCreateProject={() => createProjectFromChat(chatContextMenu.conversationId)}
+          x={chatContextMenu.x}
+          y={chatContextMenu.y}
+        />
       ) : null}
     </main>
   );
@@ -963,8 +1524,8 @@ function clampSidebarWidth(width: number) {
 }
 
 function conversationTitle(
-  conversation: Conversation,
-  conversations: Conversation[],
+  conversation: { title: string | null },
+  conversations: { title: string | null }[],
   index: number
 ) {
   const base = normalizeConversationTitle(conversation.title);
@@ -978,6 +1539,14 @@ function conversationTitle(
       .slice(0, index + 1)
       .filter((item) => normalizeConversationTitle(item.title) === base).length || 1;
   return `${base} ${occurrence}`;
+}
+
+function resolveGeneratedImageUrl(message: ChatMessage) {
+  if (message.imageUrl) return message.imageUrl;
+  const generated = message.attachments?.find(
+    (attachment) => attachment.metadata?.kind === "generated_image"
+  );
+  return generated?.previewUrl ?? generated?.fullUrl ?? undefined;
 }
 
 function normalizeConversationTitle(title: string | null) {
@@ -1108,15 +1677,53 @@ function isSpreadsheet(attachment: FileAttachment) {
 }
 
 function shouldGenerateImage(message: string) {
-  return /(?:создай|сгенерируй|нарисуй|generate|create|make).{0,60}(?:изображ|картин|image|picture|photo|фото)/i.test(
-    message
-  );
+  const text = message.trim();
+  if (!text) return false;
+
+  const hasImageWord =
+    /(?:изображен|картин|picture|image|photo|фото|иллюстра|арт\b|artwork|icon|лого|logo|wallpaper|обо[ий])/i.test(
+      text
+    );
+  const hasCreateVerb =
+    /(?:сгенериру|созда|нарисуй|нарис|отрис|сделай|сделать|нарисовать|создать|generate|create|make|draw|render|paint|design|produce|visuali)/i.test(
+      text
+    );
+  const shortCommand =
+    /(?:^|\s)(?:нарисуй|сгенерируй|создай(?:\s+(?:мне\s+)?(?:картин|изображ|фото|picture|image))?|generate(?:\s+an?\s+image)?|draw(?:\s+me)?)(?:[\s!.?]|$)/i.test(
+      text
+    );
+  const politeRequest =
+    /(?:хочу|нужн|можешь|можно|please|want|need).{0,50}(?:изображ|картин|picture|image|photo|фото|иллюстра)/i.test(
+      text
+    );
+
+  return shortCommand || politeRequest || (hasImageWord && hasCreateVerb);
 }
 
 function shouldEditImage(message: string) {
   return /(?:улучши|измени|перегенерируй|переделай|отредактируй|сделай|добавь|убери|замени|вариант|edit|improve|change|modify|variation)/i.test(
     message
   );
+}
+
+function formatUploadError(error: unknown) {
+  const message = error instanceof Error ? error.message : "Ошибка загрузки файла";
+  if (/unsupported Unicode escape sequence/i.test(message)) {
+    return "Не удалось сохранить файл: неподдерживаемая кодировка. Сохраните файл как UTF-8.";
+  }
+  if (/pdf\.worker|fake worker failed/i.test(message)) {
+    return "Не удалось обработать PDF. Попробуйте другой файл или формат.";
+  }
+  if (/Could not upload file to storage|Bucket not found|fetch failed/i.test(message)) {
+    return "Не удалось загрузить файл в хранилище Supabase. Проверьте bucket documents и интернет.";
+  }
+  if (/Could not save document metadata/i.test(message)) {
+    return "Файл загружен, но не сохранился в базе. Проверьте таблицу documents в Supabase.";
+  }
+  if (/не поддержан/i.test(message)) {
+    return message;
+  }
+  return message;
 }
 
 function inferClientFileType(name: string) {

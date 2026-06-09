@@ -136,7 +136,9 @@ export async function saveMessage(
 ) {
   const supabase = getSupabase();
   const payload: Record<string, unknown> = { role, content, metadata };
-  if (conversationId) payload.conversation_id = conversationId;
+  if (conversationId && String(conversationId) !== "legacy") {
+    payload.conversation_id = conversationId;
+  }
   let { data, error } = await supabase
     .from("messages")
     .insert(payload)

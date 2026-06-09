@@ -2,18 +2,18 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Second Brain",
-  description: "A ChatGPT-like PWA with your own long-term memory.",
+  title: "TBrain",
+  description: "Умный чат с личной памятью в стиле T-Bank.",
   manifest: "/manifest.webmanifest",
   appleWebApp: {
     capable: true,
-    statusBarStyle: "default",
-    title: "Second Brain"
+    statusBarStyle: "black-translucent",
+    title: "TBrain"
   }
 };
 
 export const viewport: Viewport = {
-  themeColor: "#f7f7f4",
+  themeColor: "#FFDD2D",
   width: "device-width",
   initialScale: 1,
   maximumScale: 1

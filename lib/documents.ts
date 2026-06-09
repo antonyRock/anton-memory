@@ -32,38 +32,120 @@ export type StoredImageFile = {
 const DOCUMENTS_BUCKET = "documents";
 const MAX_EXTRACTED_TEXT = 80_000;
 const MAX_ROWS_PER_SHEET = 200;
+let pdfWorkerConfigured = false;
 
-export async function processAndStoreFile(file: File): Promise<StoredDocument> {
+function sanitizeStorageText(text: string) {
+  return text.replace(/\u0000/g, "");
+}
+
+function decodeTextBytes(bytes: Buffer) {
+  if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return sanitizeStorageText(bytes.subarray(2).toString("utf16le"));
+  }
+
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    const swapped = Buffer.alloc(bytes.length - 2);
+    for (let index = 2; index + 1 < bytes.length; index += 2) {
+      swapped[index - 2] = bytes[index + 1];
+      swapped[index - 1] = bytes[index];
+    }
+    return sanitizeStorageText(swapped.toString("utf16le"));
+  }
+
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return sanitizeStorageText(bytes.subarray(3).toString("utf8"));
+  }
+
+  const utf8 = bytes.toString("utf8");
+  if (!utf8.includes("\u0000")) return utf8;
+
+  return sanitizeStorageText(bytes.toString("utf16le"));
+}
+
+async function ensurePdfWorker() {
+  if (pdfWorkerConfigured) return;
+
+  const { PDFParse } = await import("pdf-parse");
+  const { pathToFileURL } = await import("node:url");
+  const path = await import("node:path");
+  const workerPath = path.join(
+    process.cwd(),
+    "node_modules",
+    "pdf-parse",
+    "dist",
+    "pdf-parse",
+    "cjs",
+    "pdf.worker.mjs"
+  );
+
+  PDFParse.setWorker(pathToFileURL(workerPath).href);
+  pdfWorkerConfigured = true;
+}
+
+async function uploadStorageFile(storagePath: string, bytes: Buffer, contentType: string) {
+  const supabase = getSupabase();
+  const body = new Uint8Array(bytes);
+  let lastMessage = "unknown error";
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const { error } = await supabase.storage.from(DOCUMENTS_BUCKET).upload(storagePath, body, {
+      contentType,
+      upsert: false
+    });
+    if (!error) return;
+    lastMessage = error.message;
+    await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+  }
+
+  throw new Error(`Could not upload file to storage: ${lastMessage}`);
+}
+
+export async function storedDocumentToAttachment(
+  document: StoredDocument
+): Promise<DocumentAttachment> {
+  return toDocumentAttachment({
+    id: document.id,
+    file_name: document.file_name,
+    file_type: document.file_type,
+    file_size: document.file_size,
+    storage_path: document.storage_path,
+    summary: document.summary,
+    metadata: document.metadata
+  });
+}
+
+export async function processAndStoreFile(
+  file: File,
+  projectId?: string | number | null
+): Promise<StoredDocument> {
   const bytes = Buffer.from(await file.arrayBuffer());
   const storagePath = `uploads/${Date.now()}-${sanitizeFileName(file.name)}`;
   const extracted = await extractFileText(file, bytes);
-  const summary = summarizeExtractedText(extracted.text);
+  const extractedText = sanitizeStorageText(extracted.text);
+  const summary = summarizeExtractedText(extractedText);
   const supabase = getSupabase();
 
-  const { error: uploadError } = await supabase.storage
-    .from(DOCUMENTS_BUCKET)
-    .upload(storagePath, bytes, {
-      contentType: file.type || "application/octet-stream",
-      upsert: false
-    });
+  await uploadStorageFile(storagePath, bytes, file.type || "application/octet-stream");
 
-  if (uploadError) {
-    throw new Error(`Could not upload file to storage: ${uploadError.message}`);
+  const insertPayload = {
+    file_name: file.name,
+    file_type: file.type || inferTypeFromName(file.name),
+    file_size: file.size,
+    storage_path: storagePath,
+    extracted_text: extractedText,
+    summary,
+    metadata: extracted.metadata,
+    ...(projectId ? { project_id: projectId } : {})
+  };
+
+  let { data, error } = await supabase.from("documents").insert(insertPayload).select("*").single();
+
+  if (error && projectId && /project_id|foreign key|violates foreign key/i.test(error.message)) {
+    const { project_id: _ignored, ...withoutProject } = insertPayload as Record<string, unknown> & {
+      project_id?: string | number;
+    };
+    ({ data, error } = await supabase.from("documents").insert(withoutProject).select("*").single());
   }
-
-  const { data, error } = await supabase
-    .from("documents")
-    .insert({
-      file_name: file.name,
-      file_type: file.type || inferTypeFromName(file.name),
-      file_size: file.size,
-      storage_path: storagePath,
-      extracted_text: extracted.text,
-      summary,
-      metadata: extracted.metadata
-    })
-    .select("*")
-    .single();
 
   if (error) {
     throw new Error(`Could not save document metadata: ${error.message}`);
@@ -78,20 +160,10 @@ export async function storeGeneratedImage(input: {
   sourceDocumentIds?: Array<string | number>;
 }) {
   const storagePath = `generated/${Date.now()}-${randomId()}.png`;
-  const supabase = getSupabase();
-
-  const { error: uploadError } = await supabase.storage
-    .from(DOCUMENTS_BUCKET)
-    .upload(storagePath, input.imageBytes, {
-      contentType: "image/png",
-      upsert: false
-    });
-
-  if (uploadError) {
-    throw new Error(`Could not upload generated image: ${uploadError.message}`);
-  }
+  await uploadStorageFile(storagePath, input.imageBytes, "image/png");
 
   const summary = `Generated image for prompt: ${input.prompt.slice(0, 500)}`;
+  const supabase = getSupabase();
   const { data, error } = await supabase
     .from("documents")
     .insert({
@@ -359,9 +431,10 @@ async function toDocumentAttachment(document: Record<string, unknown>): Promise<
 
 async function createSignedUrl(storagePath: string) {
   const supabase = getSupabase();
+  // Temporary view link; a fresh one is created each time messages are loaded.
   const { data, error } = await supabase.storage
     .from(DOCUMENTS_BUCKET)
-    .createSignedUrl(storagePath, 60 * 60);
+    .createSignedUrl(storagePath, 60 * 60 * 24);
 
   if (error) {
     console.error("Could not create signed URL:", error.message);
@@ -397,7 +470,7 @@ async function extractFileText(file: File, bytes: Buffer) {
 
   if (isTextLike(type, lowerName)) {
     return {
-      text: bytes.toString("utf8").slice(0, MAX_EXTRACTED_TEXT),
+      text: decodeTextBytes(bytes).slice(0, MAX_EXTRACTED_TEXT),
       metadata: { kind: "text" }
     };
   }
@@ -447,16 +520,22 @@ function extractSpreadsheet(bytes: Buffer) {
 }
 
 async function extractPdf(bytes: Buffer) {
+  await ensurePdfWorker();
   const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: new Uint8Array(bytes) });
-  const parsed = await parser.getText();
-  return {
-    text: String(parsed.text ?? "").slice(0, MAX_EXTRACTED_TEXT),
-    metadata: {
-      kind: "pdf",
-      page_count: parsed.pages?.length
-    }
-  };
+
+  try {
+    const parsed = await parser.getText();
+    return {
+      text: sanitizeStorageText(String(parsed.text ?? "")).slice(0, MAX_EXTRACTED_TEXT),
+      metadata: {
+        kind: "pdf",
+        page_count: parsed.pages?.length
+      }
+    };
+  } finally {
+    await parser.destroy();
+  }
 }
 
 async function extractDocx(bytes: Buffer) {
