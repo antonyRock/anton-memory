@@ -5,6 +5,7 @@ export type MemoryContext = {
   entities: Record<string, unknown>[];
   tasks: Record<string, unknown>[];
   recentMessages: Record<string, unknown>[];
+  historicalMessages: Record<string, unknown>[];
 };
 
 export type MemoryExtraction = {
@@ -71,16 +72,123 @@ async function safeSelectRecentMessages() {
   return data ?? [];
 }
 
+function buildSearchTerms(query: string, identityQuery: boolean) {
+  if (identityQuery) {
+    return ["зовут", "звать", "имя", "антон", "anton"];
+  }
+
+  return [
+    ...new Set(
+      query
+        .toLowerCase()
+        .split(/[^a-zа-яё0-9]+/i)
+        .filter((term) => term.length >= 3)
+    )
+  ].slice(0, 4);
+}
+
+async function searchHistoricalMessages(terms: string[]) {
+  if (terms.length === 0) return [];
+
+  const supabase = getSupabase();
+  const batches = await Promise.all(
+    terms.map(async (term) => {
+      const pattern = `%${term}%`;
+      const initial = await supabase
+        .from("messages")
+        .select("id, role, content, created_at, conversation_id")
+        .ilike("content", pattern)
+        .order("created_at", { ascending: false })
+        .limit(12);
+
+      if (!initial.error) return initial.data ?? [];
+
+      const fallback = await supabase
+        .from("messages")
+        .select("id, role, content, created_at")
+        .ilike("content", pattern)
+        .order("created_at", { ascending: false })
+        .limit(12);
+
+      if (fallback.error) {
+        console.error("Historical message search failed:", fallback.error.message);
+        return [];
+      }
+
+      return fallback.data ?? [];
+    })
+  );
+
+  return mergeUniqueRecords(...batches);
+}
+
+async function searchFactsByTerms(terms: string[]) {
+  if (terms.length === 0) return [];
+
+  const supabase = getSupabase();
+  const batches = await Promise.all(
+    terms.map(async (term) => {
+      const pattern = `%${term}%`;
+      const { data, error } = await supabase
+        .from("facts")
+        .select("*")
+        .or(`content.ilike.${pattern},fact.ilike.${pattern}`)
+        .order("created_at", { ascending: false })
+        .limit(8);
+
+      if (error) {
+        console.error("Fact search failed:", error.message);
+        return [];
+      }
+
+      return data ?? [];
+    })
+  );
+
+  return mergeUniqueRecords(...batches);
+}
+
+async function searchEntitiesByTerms(terms: string[]) {
+  if (terms.length === 0) return [];
+
+  const supabase = getSupabase();
+  const batches = await Promise.all(
+    terms.map(async (term) => {
+      const pattern = `%${term}%`;
+      const { data, error } = await supabase
+        .from("entities")
+        .select("*")
+        .or(`name.ilike.${pattern},description.ilike.${pattern}`)
+        .order("created_at", { ascending: false })
+        .limit(8);
+
+      if (error) {
+        console.error("Entity search failed:", error.message);
+        return [];
+      }
+
+      return data ?? [];
+    })
+  );
+
+  return mergeUniqueRecords(...batches);
+}
+
 export async function retrieveMemory(query: string): Promise<MemoryContext> {
   const identityQuery = isIdentityQuery(query);
   const extraTerms = identityQuery ? ["имя", "зовут", "name", "антон", "anton"] : undefined;
+  const searchTerms = buildSearchTerms(query, identityQuery);
 
-  const [facts, entities, tasks, recentMessages] = await Promise.all([
-    safeSelect("facts"),
-    safeSelect("entities"),
-    safeSelect("tasks"),
-    safeSelectRecentMessages()
-  ]);
+  const [facts, entities, tasks, recentMessages, historicalMessages, searchedFacts, searchedEntities] =
+    await Promise.all([
+      safeSelect("facts"),
+      safeSelect("entities"),
+      safeSelect("tasks"),
+      safeSelectRecentMessages(),
+      searchHistoricalMessages(searchTerms),
+      searchFactsByTerms(searchTerms),
+      searchEntitiesByTerms(searchTerms)
+    ]);
 
   let rankedFacts = rankRecords(facts, query, { extraTerms });
   let rankedEntities = rankRecords(entities, query, { extraTerms });
@@ -89,6 +197,14 @@ export async function retrieveMemory(query: string): Promise<MemoryContext> {
     extraTerms,
     requireMatch: !identityQuery
   });
+  let rankedHistorical = rankRecords(historicalMessages, query, {
+    extraTerms,
+    requireMatch: false,
+    limit: 12
+  });
+
+  rankedFacts = mergeUniqueRecords(searchedFacts, rankedFacts);
+  rankedEntities = mergeUniqueRecords(searchedEntities, rankedEntities);
 
   if (identityQuery) {
     rankedFacts = mergeUniqueRecords(profileLikeRecords(facts), rankedFacts).slice(0, 12);
@@ -100,13 +216,22 @@ export async function retrieveMemory(query: string): Promise<MemoryContext> {
       recentMessages.filter((record) => isProfileLikeRecord(record)),
       rankRecords(recentMessages, query, { extraTerms, requireMatch: false })
     ).slice(0, 8);
+    rankedHistorical = mergeUniqueRecords(
+      historicalMessages.filter((record) => isProfileLikeRecord(record)),
+      rankedHistorical
+    ).slice(0, 12);
+  } else {
+    rankedFacts = rankedFacts.slice(0, 12);
+    rankedEntities = rankedEntities.slice(0, 12);
+    rankedHistorical = rankedHistorical.slice(0, 10);
   }
 
   return {
     facts: rankedFacts,
     entities: rankedEntities,
     tasks: rankedTasks,
-    recentMessages: rankedMessages
+    recentMessages: rankedMessages,
+    historicalMessages: rankedHistorical
   };
 }
 
@@ -135,7 +260,8 @@ export function formatMemoryForPrompt(memory: MemoryContext) {
     ["Facts", memory.facts],
     ["Entities", memory.entities],
     ["Tasks", memory.tasks],
-    ["Recent user messages", memory.recentMessages]
+    ["Recent user messages", memory.recentMessages],
+    ["Matching messages from chat history", memory.historicalMessages]
   ] as const;
 
   return sections
