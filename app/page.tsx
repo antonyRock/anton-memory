@@ -1714,8 +1714,8 @@ function formatUploadError(error: unknown) {
   if (/pdf\.worker|fake worker failed/i.test(message)) {
     return "Не удалось обработать PDF. Попробуйте другой файл или формат.";
   }
-  if (/Could not upload file to storage|Bucket not found|fetch failed/i.test(message)) {
-    return "Не удалось загрузить файл в хранилище Supabase. Проверьте bucket documents и интернет.";
+  if (/Could not upload file to storage|Bucket not found|fetch failed|Failed to fetch|network/i.test(message)) {
+    return "Не удалось загрузить файл в облако. Попробуйте ещё раз или выберите файл поменьше.";
   }
   if (/Could not save document metadata/i.test(message)) {
     return "Файл загружен, но не сохранился в базе. Проверьте таблицу documents в Supabase.";

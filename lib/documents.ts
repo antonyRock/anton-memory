@@ -32,6 +32,7 @@ export type StoredImageFile = {
 const DOCUMENTS_BUCKET = "documents";
 const MAX_EXTRACTED_TEXT = 80_000;
 const MAX_ROWS_PER_SHEET = 200;
+const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
 let pdfWorkerConfigured = false;
 
 function sanitizeStorageText(text: string) {
@@ -83,21 +84,83 @@ async function ensurePdfWorker() {
 }
 
 async function uploadStorageFile(storagePath: string, bytes: Buffer, contentType: string) {
+  const clientError = await uploadWithSupabaseClient(storagePath, bytes, contentType);
+  if (!clientError) return;
+
+  const restError = await uploadWithRestApi(storagePath, bytes, contentType);
+  if (!restError) return;
+
+  throw new Error(`Could not upload file to storage: ${restError || clientError}`);
+}
+
+async function uploadWithSupabaseClient(
+  storagePath: string,
+  bytes: Buffer,
+  contentType: string
+) {
   const supabase = getSupabase();
   const body = new Uint8Array(bytes);
   let lastMessage = "unknown error";
 
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const { error } = await supabase.storage.from(DOCUMENTS_BUCKET).upload(storagePath, body, {
-      contentType,
-      upsert: false
-    });
-    if (!error) return;
-    lastMessage = error.message;
+    try {
+      const { error } = await supabase.storage.from(DOCUMENTS_BUCKET).upload(storagePath, body, {
+        contentType,
+        upsert: attempt > 0
+      });
+      if (!error) return null;
+      lastMessage = error.message;
+    } catch (error) {
+      lastMessage = error instanceof Error ? error.message : "upload failed";
+    }
     await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
   }
 
-  throw new Error(`Could not upload file to storage: ${lastMessage}`);
+  return lastMessage;
+}
+
+async function uploadWithRestApi(storagePath: string, bytes: Buffer, contentType: string) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!supabaseUrl || !serviceRoleKey) {
+    return "Supabase env is not configured.";
+  }
+
+  const encodedPath = storagePath
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+  const url = `${supabaseUrl.replace(/\/$/, "")}/storage/v1/object/${DOCUMENTS_BUCKET}/${encodedPath}`;
+  let lastMessage = "unknown error";
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${serviceRoleKey}`,
+          "Content-Type": contentType,
+          "x-upsert": attempt > 0 ? "true" : "false"
+        },
+        body: new Uint8Array(bytes),
+        signal: AbortSignal.timeout(30_000)
+      });
+
+      if (response.ok) return null;
+
+      const payload = await response.text();
+      lastMessage = payload || `HTTP ${response.status}`;
+    } catch (error) {
+      lastMessage = error instanceof Error ? error.message : "upload failed";
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
+  }
+
+  return lastMessage;
+}
+
+function canStoreImageInline(fileType: string, bytes: Buffer) {
+  return fileType.startsWith("image/") && bytes.length <= MAX_INLINE_IMAGE_BYTES;
 }
 
 export async function storedDocumentToAttachment(
@@ -119,22 +182,37 @@ export async function processAndStoreFile(
   projectId?: string | number | null
 ): Promise<StoredDocument> {
   const bytes = Buffer.from(await file.arrayBuffer());
+  const fileType = file.type || inferTypeFromName(file.name);
   const storagePath = `uploads/${Date.now()}-${sanitizeFileName(file.name)}`;
   const extracted = await extractFileText(file, bytes);
   const extractedText = sanitizeStorageText(extracted.text);
   const summary = summarizeExtractedText(extractedText);
   const supabase = getSupabase();
+  let metadata: Record<string, unknown> = extracted.metadata;
+  let savedStoragePath = storagePath;
 
-  await uploadStorageFile(storagePath, bytes, file.type || "application/octet-stream");
+  try {
+    await uploadStorageFile(storagePath, bytes, fileType || "application/octet-stream");
+  } catch (storageError) {
+    if (!canStoreImageInline(fileType, bytes)) throw storageError;
+
+    savedStoragePath = "";
+    metadata = {
+      ...metadata,
+      inline_base64: bytes.toString("base64"),
+      storage_fallback: "inline"
+    };
+    console.error("Storage upload failed, saved image inline:", storageError);
+  }
 
   const insertPayload = {
     file_name: file.name,
-    file_type: file.type || inferTypeFromName(file.name),
+    file_type: fileType,
     file_size: file.size,
-    storage_path: storagePath,
+    storage_path: savedStoragePath,
     extracted_text: extractedText,
     summary,
-    metadata: extracted.metadata,
+    metadata,
     ...(projectId ? { project_id: projectId } : {})
   };
 
@@ -387,13 +465,25 @@ async function getImageFiles(ids: Array<string | number>): Promise<StoredImageFi
 
   const images: StoredImageFile[] = [];
   for (const document of data ?? []) {
-    const metadata = document.metadata as { kind?: string } | null;
+    const metadata = normalizeMetadata(document.metadata);
     const fileType = String(document.file_type ?? "");
     if (!isImageDocument(fileType, metadata)) continue;
 
-    const downloaded = await supabase.storage
-      .from(DOCUMENTS_BUCKET)
-      .download(String(document.storage_path));
+    const inlineBase64 =
+      typeof metadata.inline_base64 === "string" ? metadata.inline_base64 : null;
+    if (inlineBase64) {
+      images.push({
+        fileName: String(document.file_name ?? "image.png"),
+        fileType: fileType || "image/png",
+        buffer: Buffer.from(inlineBase64, "base64")
+      });
+      continue;
+    }
+
+    const storagePath = String(document.storage_path ?? "");
+    if (!storagePath) continue;
+
+    const downloaded = await supabase.storage.from(DOCUMENTS_BUCKET).download(storagePath);
 
     if (downloaded.error) {
       console.error("Image download failed:", downloaded.error.message);
@@ -415,7 +505,12 @@ async function toDocumentAttachment(document: Record<string, unknown>): Promise<
   const metadata = normalizeMetadata(document.metadata);
   const storagePath = String(document.storage_path ?? "");
   const isImage = isImageDocument(fileType, metadata);
-  const signedUrl = isImage && storagePath ? await createSignedUrl(storagePath) : null;
+  const inlineBase64 =
+    typeof metadata.inline_base64 === "string" ? metadata.inline_base64 : null;
+  const inlineDataUrl =
+    isImage && inlineBase64 ? `data:${fileType};base64,${inlineBase64}` : null;
+  const signedUrl =
+    isImage && storagePath && !inlineDataUrl ? await createSignedUrl(storagePath) : null;
 
   return {
     id: document.id as string | number,
@@ -424,8 +519,8 @@ async function toDocumentAttachment(document: Record<string, unknown>): Promise<
     fileSize: Number(document.file_size ?? 0),
     summary: document.summary ? String(document.summary) : null,
     metadata,
-    previewUrl: signedUrl,
-    fullUrl: signedUrl
+    previewUrl: inlineDataUrl ?? signedUrl,
+    fullUrl: inlineDataUrl ?? signedUrl
   };
 }
 

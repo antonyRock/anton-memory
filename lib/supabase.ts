@@ -21,6 +21,13 @@ export function getSupabase() {
     auth: {
       persistSession: false,
       autoRefreshToken: false
+    },
+    global: {
+      fetch: (input, init) =>
+        fetch(input, {
+          ...init,
+          signal: init?.signal ?? AbortSignal.timeout(30_000)
+        })
     }
   });
 
