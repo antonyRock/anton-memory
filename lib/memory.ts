@@ -87,39 +87,61 @@ function buildSearchTerms(query: string, identityQuery: boolean) {
   ].slice(0, 4);
 }
 
-async function searchHistoricalMessages(terms: string[]) {
+async function searchHistoricalMessages(
+  terms: string[],
+  conversationId?: string | number | null
+) {
   if (terms.length === 0) return [];
 
   const supabase = getSupabase();
   const batches = await Promise.all(
-    terms.map(async (term) => {
+    terms.flatMap((term) => {
       const pattern = `%${term}%`;
-      const initial = await supabase
-        .from("messages")
-        .select("id, role, content, created_at, conversation_id")
-        .ilike("content", pattern)
-        .order("created_at", { ascending: false })
-        .limit(12);
+      const queries = [
+        supabase
+          .from("messages")
+          .select("id, role, content, created_at, conversation_id")
+          .ilike("content", pattern)
+          .order("created_at", { ascending: false })
+          .limit(12)
+      ];
 
-      if (!initial.error) return initial.data ?? [];
-
-      const fallback = await supabase
-        .from("messages")
-        .select("id, role, content, created_at")
-        .ilike("content", pattern)
-        .order("created_at", { ascending: false })
-        .limit(12);
-
-      if (fallback.error) {
-        console.error("Historical message search failed:", fallback.error.message);
-        return [];
+      if (conversationId && String(conversationId) !== "legacy") {
+        queries.unshift(
+          supabase
+            .from("messages")
+            .select("id, role, content, created_at, conversation_id")
+            .eq("conversation_id", conversationId)
+            .ilike("content", pattern)
+            .order("created_at", { ascending: false })
+            .limit(12)
+        );
       }
 
-      return fallback.data ?? [];
+      return queries;
     })
   );
 
-  return mergeUniqueRecords(...batches);
+  const records: Record<string, unknown>[] = [];
+  for (const result of batches) {
+    if (result.error) {
+      console.error("Historical message search failed:", result.error.message);
+      continue;
+    }
+    records.push(...(result.data ?? []));
+  }
+
+  return mergeUniqueRecords(records);
+}
+
+export function detectNameFromTexts(texts: string[]) {
+  for (const text of texts) {
+    const match = text.match(
+      /(?:меня\s+(?:зовут|звать)|my\s+name\s+is|call\s+me|я\s+[-—–]?\s*)\s*([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]{1,30})/iu
+    );
+    if (match?.[1]) return match[1].trim();
+  }
+  return null;
 }
 
 async function searchFactsByTerms(terms: string[]) {
@@ -174,7 +196,10 @@ async function searchEntitiesByTerms(terms: string[]) {
   return mergeUniqueRecords(...batches);
 }
 
-export async function retrieveMemory(query: string): Promise<MemoryContext> {
+export async function retrieveMemory(
+  query: string,
+  conversationId?: string | number | null
+): Promise<MemoryContext> {
   const identityQuery = isIdentityQuery(query);
   const extraTerms = identityQuery ? ["имя", "зовут", "name", "антон", "anton"] : undefined;
   const searchTerms = buildSearchTerms(query, identityQuery);
@@ -185,7 +210,7 @@ export async function retrieveMemory(query: string): Promise<MemoryContext> {
       safeSelect("entities"),
       safeSelect("tasks"),
       safeSelectRecentMessages(),
-      searchHistoricalMessages(searchTerms),
+      searchHistoricalMessages(searchTerms, conversationId),
       searchFactsByTerms(searchTerms),
       searchEntitiesByTerms(searchTerms)
     ]);

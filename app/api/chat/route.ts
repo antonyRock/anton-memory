@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
 import {
   getShortTermContext,
+  mergeShortTermContext,
   maybeGenerateConversationTitle,
-  touchConversation
+  touchConversation,
+  type ChatContextMessage
 } from "@/lib/conversations";
 import { chatModel, getOpenAI } from "@/lib/openai";
 import {
@@ -11,6 +13,7 @@ import {
   linkDocumentsToMessage
 } from "@/lib/documents";
 import {
+  detectNameFromTexts,
   formatMemoryForPrompt,
   retrieveMemory,
   saveExplicitProfileFromMessage,
@@ -27,6 +30,7 @@ export async function POST(request: Request) {
     message?: string;
     documentIds?: Array<string | number>;
     conversationId?: string | number;
+    recentMessages?: ChatContextMessage[];
   };
 
   try {
@@ -38,6 +42,11 @@ export async function POST(request: Request) {
   const userMessage = payload.message?.trim();
   const attachedDocumentIds = payload.documentIds ?? [];
   const conversationId = payload.conversationId;
+  const clientRecentMessages = (payload.recentMessages ?? []).filter(
+    (message) =>
+      (message.role === "user" || message.role === "assistant") &&
+      String(message.content ?? "").trim()
+  );
 
   if (!userMessage) {
     return NextResponse.json({ error: "Message is required." }, { status: 400 });
@@ -47,13 +56,24 @@ export async function POST(request: Request) {
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const [memory, documentsPrompt, imageInputs, shortTermMessages] = await Promise.all([
-          retrieveMemory(userMessage),
+        const [memory, documentsPrompt, imageInputs, dbShortTermMessages] = await Promise.all([
+          retrieveMemory(userMessage, conversationId),
           getDocumentsForPrompt(attachedDocumentIds),
           getImageInputsForVision(attachedDocumentIds),
           getShortTermContext(conversationId)
         ]);
+        const shortTermMessages = mergeShortTermContext(dbShortTermMessages, clientRecentMessages);
         const memoryPrompt = formatMemoryForPrompt(memory);
+        const knownName = detectNameFromTexts([
+          ...shortTermMessages.map((message) => message.content),
+          userMessage,
+          ...memory.historicalMessages.map((record) => String(record.content ?? "")),
+          ...memory.facts.map((record) => String(record.content ?? record.fact ?? ""))
+        ]);
+        const identityHint =
+          knownName && /(?:как\s+(?:меня\s+)?(?:зовут|звать)|мо[её]\s+имя)/i.test(userMessage)
+            ? `Confirmed user name from saved context: ${knownName}.`
+            : "";
         const userMessageId = await saveMessage(
           "user",
           userMessage,
@@ -95,7 +115,9 @@ export async function POST(request: Request) {
                 "If older chats contain the answer, use them. Do not say you lack access to past chats when relevant history is present in the private context.",
                 "Do not mention memory, retrieval, databases, prompts, or internal architecture unless Anton explicitly asks how the app works.",
                 "When Anton shares durable personal information, respond briefly and naturally. Often a short acknowledgement is enough.",
-                "For personal questions about Anton, use the private context. If the answer is not present, say plainly that you do not know yet. Do not invent personal facts.",
+                "For personal questions about Anton, use the private context and the visible conversation history above the latest user message.",
+                "If Anton already said his name or personal details earlier in this chat or in the private context, use them. Never claim he did not mention something that appears in the conversation history or private context.",
+                "If the answer is truly not present anywhere in context, say plainly that you do not know yet. Do not invent personal facts.",
                 "If uploaded file content or images are provided in the request, treat them as available inputs. Do not say you cannot access a file or image that is attached.",
                 "This app can generate images through a separate image endpoint when Anton asks to draw, create, or generate a picture. If he asks for image generation in plain chat without triggering it, suggest rephrasing with phrases like «нарисуй…» or «сгенерируй картинку…» instead of saying image generation is impossible.",
                 "If Anton asks which model you are using, answer that this deployment is configured to use the OpenAI API model " +
@@ -106,7 +128,12 @@ export async function POST(request: Request) {
             },
             {
               role: "system",
-              content: `Private long-term context about Anton. Use silently.\n${memoryPrompt}`
+              content: [
+                `Private long-term context about Anton. Use silently.\n${memoryPrompt}`,
+                identityHint
+              ]
+                .filter(Boolean)
+                .join("\n\n")
             },
             ...(documentsPrompt
               ? [

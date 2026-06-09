@@ -271,6 +271,31 @@ export async function getShortTermContext(conversationId?: string | number) {
     }));
 }
 
+export type ChatContextMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
+export function mergeShortTermContext(
+  dbMessages: ChatContextMessage[],
+  clientMessages: ChatContextMessage[] = []
+) {
+  const merged: ChatContextMessage[] = [];
+  const seen = new Set<string>();
+
+  for (const message of [...dbMessages, ...clientMessages]) {
+    const role = message.role === "assistant" ? "assistant" : "user";
+    const content = String(message.content ?? "").trim();
+    if (!content) continue;
+    const key = `${role}:${content}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push({ role, content });
+  }
+
+  return merged.slice(-12);
+}
+
 export async function touchConversation(conversationId?: string | number) {
   if (!conversationId || String(conversationId) === "legacy") return;
   const supabase = getSupabase();

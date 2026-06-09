@@ -682,6 +682,14 @@ export default function Home() {
       shouldGenerateImage(trimmed) || (hasImageAttachment && shouldEditImage(trimmed));
 
     shouldAutoScrollRef.current = true;
+    const clientRecentMessages = messages
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .slice(-12)
+      .map((message) => ({
+        role: message.role,
+        content: message.content
+      }));
+
     setMessages((current) => [
       ...current,
       { role: "user", content: displayText, attachments: readyFiles },
@@ -706,7 +714,8 @@ export default function Home() {
             : {
                 message: trimmed || "Посмотри прикреплённые файлы.",
                 documentIds: readyDocumentIds,
-                conversationId
+                conversationId,
+                recentMessages: clientRecentMessages
               }
         )
       });
