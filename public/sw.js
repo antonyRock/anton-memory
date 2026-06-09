@@ -1,4 +1,4 @@
-const CACHE_NAME = "second-brain-v2";
+const CACHE_NAME = "tbrain-v3";
 const STATIC_ASSETS = ["/manifest.webmanifest", "/icon.svg"];
 
 function shouldBypassCache(url) {

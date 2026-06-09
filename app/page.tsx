@@ -2,6 +2,7 @@
 
 import {
   FormEvent,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -15,6 +16,7 @@ import { SearchResultsList } from "@/components/SearchResultsList";
 import { SidebarMoreMenu } from "@/components/SidebarMoreMenu";
 import { ComposerTextarea, type ComposerTextareaHandle } from "@/components/ComposerTextarea";
 import { VoiceRecordingPanel } from "@/components/VoiceRecordingPanel";
+import { PullToRefreshIndicator } from "@/components/PullToRefreshIndicator";
 import { SidebarUserProfile } from "@/components/SidebarUserProfile";
 import { ProjectFolderList } from "@/components/ProjectFolderList";
 import { ChatFilesPanel } from "@/components/ChatFilesPanel";
@@ -29,6 +31,8 @@ import { isConversationPinned, sortConversationsForSidebar } from "@/lib/chat-pi
 import type { FileNavItem } from "@/lib/file-navigation";
 import { isMobileViewport } from "@/lib/viewport";
 import { useVoiceRecording } from "@/hooks/useVoiceRecording";
+import { usePullToRefresh } from "@/hooks/usePullToRefresh";
+import { MOBILE_MEDIA_QUERY } from "@/lib/viewport";
 import {
   ThinkingIndicator,
   type ThinkingPhase
@@ -159,6 +163,7 @@ export default function Home() {
   const [note, setNote] = useState("Готово");
   const [isRenamingChat, setIsRenamingChat] = useState(false);
   const [renameChatValue, setRenameChatValue] = useState("");
+  const [pullToRefreshEnabled, setPullToRefreshEnabled] = useState(false);
   const activeRequestRef = useRef<AbortController | null>(null);
   const streamReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -185,13 +190,14 @@ export default function Home() {
     }
   });
   const messagesRef = useRef<HTMLElement | null>(null);
+  const sidebarScrollRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
   const stickToBottomConversationRef = useRef<string | null>(null);
   const stickToBottomTimerRef = useRef<number | null>(null);
   const resizingSidebarRef = useRef(false);
   const hasMessages = messages.length > 0;
-  const pinComposerToBottom = hasMessages || activeConversationId != null;
+  const pinComposerToBottom = true;
   const isUploadingFiles = attachments.some((file) => file.status === "uploading");
   const showChatIndicator =
     isLoading &&
@@ -301,6 +307,18 @@ export default function Home() {
       return current === "transcription" ? null : current;
     });
   }, [isTranscribing]);
+
+  useEffect(() => {
+    const mediaQuery = window.matchMedia(MOBILE_MEDIA_QUERY);
+    const update = () => {
+      setPullToRefreshEnabled(
+        mediaQuery.matches && typeof window !== "undefined" && "ontouchstart" in window
+      );
+    };
+    update();
+    mediaQuery.addEventListener("change", update);
+    return () => mediaQuery.removeEventListener("change", update);
+  }, []);
 
   useEffect(() => {
     if (activeConversationId == null) return;
@@ -857,6 +875,37 @@ export default function Home() {
       }
     }
   }
+
+  const refreshAppData = useCallback(async () => {
+    setNote("Обновление...");
+    try {
+      await Promise.all([
+        loadRecentConversations(),
+        loadProjects(),
+        activeConversationId != null
+          ? loadMessages(activeConversationId)
+          : Promise.resolve()
+      ]);
+      setNote("Обновлено");
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось обновить");
+    }
+  }, [activeConversationId]);
+
+  const pullToRefreshActive =
+    pullToRefreshEnabled && !isLoading && !isRecording && !isTranscribing;
+
+  const messagesPull = usePullToRefresh({
+    enabled: pullToRefreshActive,
+    onRefresh: refreshAppData,
+    targetRef: messagesRef
+  });
+
+  const sidebarPull = usePullToRefresh({
+    enabled: pullToRefreshActive && sidebarOpen,
+    onRefresh: refreshAppData,
+    targetRef: sidebarScrollRef
+  });
 
   function resetToNewChat() {
     cancelPendingMessageLoad();
@@ -1708,12 +1757,24 @@ export default function Home() {
           ) : null}
         </header>
 
-        <section
-          className={`messages ${hasMessages ? "" : "empty"} ${showProjectView ? "project-view" : ""}`}
-          key={String(activeConversationId ?? activeProjectId ?? "no-conversation")}
-          ref={messagesRef}
-          aria-live="polite"
-        >
+        <div className="messages-pull-host">
+          <PullToRefreshIndicator
+            isRefreshing={messagesPull.isRefreshing}
+            pullDistance={messagesPull.pullDistance}
+          />
+          <section
+            className={`messages ${hasMessages ? "" : "empty"} ${showProjectView ? "project-view" : ""} ${
+              messagesPull.isActive ? "is-pulling" : ""
+            } ${messagesPull.isRefreshing ? "is-refreshing" : ""}`}
+            key={String(activeConversationId ?? activeProjectId ?? "no-conversation")}
+            ref={messagesRef}
+            aria-live="polite"
+            style={
+              messagesPull.isActive
+                ? ({ "--pull-offset": `${messagesPull.pullDistance}px` } as CSSProperties)
+                : undefined
+            }
+          >
           {showProjectView && activeProject ? (
             <ProjectNavigator
               conversations={projectConversations}
@@ -1817,6 +1878,7 @@ export default function Home() {
           ) : null}
           <div ref={endRef} />
         </section>
+        </div>
 
         {!showProjectView ? (
         <div className={`composer-wrap ${pinComposerToBottom ? "" : "empty"}`}>
@@ -2035,7 +2097,22 @@ export default function Home() {
           <div aria-hidden="true" className="sidebar-divider" />
         </div>
 
-        <div className="sidebar-scroll">
+        <div className="sidebar-scroll-host">
+          <PullToRefreshIndicator
+            isRefreshing={sidebarPull.isRefreshing}
+            pullDistance={sidebarPull.pullDistance}
+          />
+          <div
+            className={`sidebar-scroll ${sidebarPull.isActive ? "is-pulling" : ""} ${
+              sidebarPull.isRefreshing ? "is-refreshing" : ""
+            }`}
+            ref={sidebarScrollRef}
+            style={
+              sidebarPull.isActive
+                ? ({ "--pull-offset": `${sidebarPull.pullDistance}px` } as CSSProperties)
+                : undefined
+            }
+          >
           <div className="sidebar-section-header">
             <button
               className="sidebar-section-toggle sidebar-section-toggle-main"
@@ -2158,6 +2235,7 @@ export default function Home() {
               results={searchResults}
             />
           ) : null}
+        </div>
         </div>
 
         <SidebarUserProfile
