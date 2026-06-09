@@ -13,6 +13,7 @@ import {
 import {
   formatMemoryForPrompt,
   retrieveMemory,
+  saveExplicitProfileFromMessage,
   saveExtractedMemory,
   saveMessage
 } from "@/lib/memory";
@@ -59,6 +60,7 @@ export async function POST(request: Request) {
           { document_ids: attachedDocumentIds },
           conversationId
         );
+        await saveExplicitProfileFromMessage(userMessage, userMessageId);
         await touchConversation(conversationId);
         await linkDocumentsToMessage({
           messageId: userMessageId,

@@ -15,6 +15,8 @@ export type MemoryExtraction = {
 
 const SEARCH_LIMIT = 8;
 const SEARCH_POOL_LIMIT = 50;
+const IDENTITY_QUERY =
+  /(?:как\s+(?:меня\s+)?(?:зовут|звать)|мо[её]\s+имя|what(?:'s| is)\s+my\s+name|who\s+am\s+i)/i;
 
 function compactRecord(record: Record<string, unknown>) {
   return Object.entries(record)
@@ -70,6 +72,9 @@ async function safeSelectRecentMessages() {
 }
 
 export async function retrieveMemory(query: string): Promise<MemoryContext> {
+  const identityQuery = isIdentityQuery(query);
+  const extraTerms = identityQuery ? ["имя", "зовут", "name", "антон", "anton"] : undefined;
+
   const [facts, entities, tasks, recentMessages] = await Promise.all([
     safeSelect("facts"),
     safeSelect("entities"),
@@ -77,12 +82,52 @@ export async function retrieveMemory(query: string): Promise<MemoryContext> {
     safeSelectRecentMessages()
   ]);
 
+  let rankedFacts = rankRecords(facts, query, { extraTerms });
+  let rankedEntities = rankRecords(entities, query, { extraTerms });
+  const rankedTasks = rankRecords(tasks, query, { extraTerms });
+  let rankedMessages = rankRecords(recentMessages, query, {
+    extraTerms,
+    requireMatch: !identityQuery
+  });
+
+  if (identityQuery) {
+    rankedFacts = mergeUniqueRecords(profileLikeRecords(facts), rankedFacts).slice(0, 12);
+    rankedEntities = mergeUniqueRecords(
+      entities.filter((record) => isPersonEntity(record) || isProfileLikeRecord(record)),
+      rankedEntities
+    ).slice(0, 12);
+    rankedMessages = mergeUniqueRecords(
+      recentMessages.filter((record) => isProfileLikeRecord(record)),
+      rankRecords(recentMessages, query, { extraTerms, requireMatch: false })
+    ).slice(0, 8);
+  }
+
   return {
-    facts: rankRecords(facts, query),
-    entities: rankRecords(entities, query),
-    tasks: rankRecords(tasks, query),
-    recentMessages: rankRecords(recentMessages, query, { requireMatch: true })
+    facts: rankedFacts,
+    entities: rankedEntities,
+    tasks: rankedTasks,
+    recentMessages: rankedMessages
   };
+}
+
+export async function saveExplicitProfileFromMessage(
+  message: string,
+  sourceMessageId?: string | number
+) {
+  const trimmed = message.trim();
+  const nameMatch = trimmed.match(
+    /(?:меня\s+(?:зовут|звать)|my\s+name\s+is|call\s+me)\s+([A-Za-zА-Яа-яЁё\-]+)/iu
+  );
+  if (!nameMatch?.[1]) return;
+
+  const name = nameMatch[1].trim();
+  await saveExtractedMemory(
+    {
+      facts: [{ content: `Имя пользователя: ${name}` }],
+      entities: [{ name, type: "person", description: "Пользователь TBrain" }]
+    },
+    sourceMessageId
+  );
 }
 
 export function formatMemoryForPrompt(memory: MemoryContext) {
@@ -106,12 +151,15 @@ export function formatMemoryForPrompt(memory: MemoryContext) {
 function rankRecords(
   records: Record<string, unknown>[],
   query: string,
-  options: { requireMatch?: boolean } = {}
+  options: { requireMatch?: boolean; extraTerms?: string[]; limit?: number } = {}
 ) {
-  const terms = query
-    .toLowerCase()
-    .split(/[^a-zа-яё0-9]+/i)
-    .filter((term) => term.length >= 3);
+  const terms = [
+    ...query
+      .toLowerCase()
+      .split(/[^a-zа-яё0-9]+/i)
+      .filter((term) => term.length >= 3),
+    ...(options.extraTerms ?? []).map((term) => term.toLowerCase())
+  ];
 
   return records
     .map((record, index) => {
@@ -124,8 +172,46 @@ function rankRecords(
     })
     .filter(({ score }) => !options.requireMatch || score > 0)
     .sort((a, b) => b.score - a.score || a.index - b.index)
-    .slice(0, SEARCH_LIMIT)
+    .slice(0, options.limit ?? SEARCH_LIMIT)
     .map(({ record }) => record);
+}
+
+function isIdentityQuery(query: string) {
+  return IDENTITY_QUERY.test(query.trim());
+}
+
+function isProfileLikeRecord(record: Record<string, unknown>) {
+  const text = compactRecord(record).toLowerCase();
+  return /имя|зовут|звать|фамил|name|call me|меня зовут|user name|пользователя/.test(text);
+}
+
+function isPersonEntity(record: Record<string, unknown>) {
+  const type = String(record.type ?? "").toLowerCase();
+  return /person|user|human|people|человек|пользов/.test(type);
+}
+
+function recordKey(record: Record<string, unknown>) {
+  return String(record.id ?? compactRecord(record));
+}
+
+function mergeUniqueRecords(...groups: Record<string, unknown>[][]) {
+  const merged: Record<string, unknown>[] = [];
+  const seen = new Set<string>();
+
+  for (const group of groups) {
+    for (const record of group) {
+      const key = recordKey(record);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      merged.push(record);
+    }
+  }
+
+  return merged;
+}
+
+function profileLikeRecords(records: Record<string, unknown>[]) {
+  return records.filter(isProfileLikeRecord);
 }
 
 export async function saveMessage(
