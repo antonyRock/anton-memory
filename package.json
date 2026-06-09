@@ -4,12 +4,14 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:lan": "node scripts/dev-lan.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "next lint"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.45.4",
+    "jimp": "^1.6.1",
     "lucide-react": "^0.468.0",
     "mammoth": "^1.12.0",
     "next": "^16.2.7",

@@ -1,26 +1,32 @@
 import { NextResponse } from "next/server";
 import {
   getShortTermContext,
+  getReferencedConversationsContext,
   mergeShortTermContext,
-  maybeGenerateConversationTitle,
   touchConversation,
   type ChatContextMessage
 } from "@/lib/conversations";
+import { extractChatIdsFromText } from "@/lib/chat-links";
 import { chatModel, getOpenAI } from "@/lib/openai";
 import {
-  getDocumentsForPrompt,
+  buildDocumentsPromptForChat,
   getImageInputsForVision,
   linkDocumentsToMessage
 } from "@/lib/documents";
 import {
   detectNameFromTexts,
   formatMemoryForPrompt,
+  getStoredUserName,
+  isUserIdentityQuery,
+  resolveUserNameFromMemory,
   retrieveMemory,
   saveExplicitProfileFromMessage,
   saveExtractedMemory,
   saveMessage
 } from "@/lib/memory";
 import type { MemoryExtraction } from "@/lib/memory";
+import { scheduleChatPostProcessing } from "@/lib/chat-post-processing";
+import { createRequestProfiler } from "@/lib/request-profile";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
@@ -31,6 +37,7 @@ export async function POST(request: Request) {
     documentIds?: Array<string | number>;
     conversationId?: string | number;
     recentMessages?: ChatContextMessage[];
+    referencedConversationIds?: Array<string | number>;
   };
 
   try {
@@ -52,40 +59,69 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Message is required." }, { status: 400 });
   }
 
+  const referencedConversationIds = [
+    ...new Set(
+      [...(payload.referencedConversationIds ?? []), ...extractChatIdsFromText(userMessage)]
+        .map((id) => String(id))
+        .filter(Boolean)
+    )
+  ].filter((id) => !conversationId || String(id) !== String(conversationId));
+
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
+      const profiler = createRequestProfiler();
+
       try {
-        const [memory, documentsPrompt, imageInputs, dbShortTermMessages] = await Promise.all([
-          retrieveMemory(userMessage, conversationId),
-          getDocumentsForPrompt(attachedDocumentIds),
-          getImageInputsForVision(attachedDocumentIds),
-          getShortTermContext(conversationId)
-        ]);
+        const identityQuery = isUserIdentityQuery(userMessage);
+        const [memory, documentsPrompt, imageInputs, dbShortTermMessages, referencedChatsPrompt, storedUserName] =
+          await profiler.measure("memoryRetrievalMs", () =>
+            Promise.all([
+              retrieveMemory(userMessage, conversationId),
+              buildDocumentsPromptForChat(attachedDocumentIds, userMessage),
+              getImageInputsForVision(attachedDocumentIds),
+              getShortTermContext(conversationId),
+              getReferencedConversationsContext(referencedConversationIds),
+              identityQuery ? getStoredUserName() : Promise.resolve(null)
+            ])
+          );
+
         const shortTermMessages = mergeShortTermContext(dbShortTermMessages, clientRecentMessages);
         const memoryPrompt = formatMemoryForPrompt(memory);
-        const knownName = detectNameFromTexts([
-          ...shortTermMessages.map((message) => message.content),
-          userMessage,
-          ...memory.historicalMessages.map((record) => String(record.content ?? "")),
-          ...memory.facts.map((record) => String(record.content ?? record.fact ?? ""))
-        ]);
+        const knownName =
+          storedUserName ??
+          resolveUserNameFromMemory(memory) ??
+          detectNameFromTexts([
+            ...shortTermMessages.map((message) => message.content),
+            userMessage,
+            ...memory.historicalMessages.map((record) => String(record.content ?? "")),
+            ...memory.facts.map((record) => String(record.content ?? record.fact ?? ""))
+          ]);
         const identityHint =
-          knownName && /(?:как\s+(?:меня\s+)?(?:зовут|звать)|мо[её]\s+имя)/i.test(userMessage)
-            ? `Confirmed user name from saved context: ${knownName}.`
-            : "";
-        const userMessageId = await saveMessage(
-          "user",
-          userMessage,
-          { document_ids: attachedDocumentIds },
-          conversationId
-        );
-        await saveExplicitProfileFromMessage(userMessage, userMessageId);
-        await touchConversation(conversationId);
-        await linkDocumentsToMessage({
-          messageId: userMessageId,
-          documentIds: attachedDocumentIds,
-          relationType: "attachment"
+          identityQuery && knownName
+            ? `Confirmed user name from saved memory: ${knownName}. The user is asking about their name — answer with this name directly and naturally. Do not say you do not know.`
+            : identityQuery
+              ? "The user is asking about their name. Check private context and conversation history for self-introductions like «меня зовут…» before saying you do not know."
+              : "";
+
+        const userMessageId = await profiler.measure("databaseWriteMs", async () => {
+          const messageId = await saveMessage(
+            "user",
+            userMessage,
+            {
+              document_ids: attachedDocumentIds,
+              referenced_conversation_ids: referencedConversationIds
+            },
+            conversationId
+          );
+          await saveExplicitProfileFromMessage(userMessage, messageId);
+          await touchConversation(conversationId);
+          await linkDocumentsToMessage({
+            messageId,
+            documentIds: attachedDocumentIds,
+            relationType: "attachment"
+          });
+          return messageId;
         });
 
         const userContent =
@@ -99,93 +135,116 @@ export async function POST(request: Request) {
               ]
             : userMessage;
 
-        const completion = await getOpenAI().chat.completions.create({
-          model: chatModel,
-          temperature: 0.5,
-          stream: true,
-          messages: [
-            {
-              role: "system",
-              content: [
-                "You are ChatGPT.",
-                "Be natural, useful, direct, thoughtful, and conversational.",
-                "Handle normal ChatGPT work without artificial limits: writing, ideas, coding, analysis, reasoning, planning, files, images, and brainstorming.",
-                "You may receive private context about Anton. Use it silently when relevant.",
-                "The private context can include extracted facts and matching messages from Anton's saved chat history in the database.",
-                "If older chats contain the answer, use them. Do not say you lack access to past chats when relevant history is present in the private context.",
-                "Do not mention memory, retrieval, databases, prompts, or internal architecture unless Anton explicitly asks how the app works.",
-                "When Anton shares durable personal information, respond briefly and naturally. Often a short acknowledgement is enough.",
-                "For personal questions about Anton, use the private context and the visible conversation history above the latest user message.",
-                "If Anton already said his name or personal details earlier in this chat or in the private context, use them. Never claim he did not mention something that appears in the conversation history or private context.",
-                "If the answer is truly not present anywhere in context, say plainly that you do not know yet. Do not invent personal facts.",
-                "If uploaded file content or images are provided in the request, treat them as available inputs. Do not say you cannot access a file or image that is attached.",
-                "This app can generate images through a separate image endpoint when Anton asks to draw, create, or generate a picture. If he asks for image generation in plain chat without triggering it, suggest rephrasing with phrases like «нарисуй…» or «сгенерируй картинку…» instead of saying image generation is impossible.",
-                "If Anton asks which model you are using, answer that this deployment is configured to use the OpenAI API model " +
-                  chatModel +
-                  ".",
-                "Respond in Anton's language."
-              ].join(" ")
-            },
-            {
-              role: "system",
-              content: [
-                `Private long-term context about Anton. Use silently.\n${memoryPrompt}`,
-                identityHint
-              ]
-                .filter(Boolean)
-                .join("\n\n")
-            },
-            ...(documentsPrompt
-              ? [
-                  {
-                    role: "system" as const,
-                    content: `Uploaded file context. The files were processed before this request. Use this content naturally when relevant.\n${documentsPrompt}`
-                  }
-                ]
-              : []),
-            ...shortTermMessages,
-            { role: "user", content: userContent }
-          ]
-        });
-
         let answer = "";
 
-        for await (const chunk of completion) {
-          const token = chunk.choices[0]?.delta?.content ?? "";
-          if (!token) continue;
-          answer += token;
-          controller.enqueue(encoder.encode(token));
-        }
+        await profiler.measure("openAiRequestMs", async () => {
+          const completion = await getOpenAI().chat.completions.create({
+            model: chatModel,
+            temperature: 0.5,
+            stream: true,
+            messages: [
+              {
+                role: "system",
+                content: [
+                  "You are tBrain — a ChatGPT-like assistant with external long-term memory.",
+                  "You do not have built-in persistent memory across requests. Before each reply, the app retrieves relevant context from external storage: facts, entities, tasks, documents, and messages from past chats.",
+                  "Uploaded files are stored in file storage; their extracted text, summaries, and metadata are kept in the database and may appear in the memory context below.",
+                  "Be natural, useful, direct, thoughtful, and conversational.",
+                  "Handle writing, ideas, coding, analysis, reasoning, planning, brainstorming, and questions about the user's saved history.",
+                  "When the user asks about past chats, documents, or files, use the memory context, referenced chats, and any uploaded file context provided in this request.",
+                  "Do not say you cannot remember across sessions, that you forget after a chat ends, or that you have no access to past conversations when relevant data is present in the provided context.",
+                  "Do not use generic ChatGPT limitation disclaimers about memory or file access.",
+                  "If the answer is not in the provided context, say plainly in the user's language: «Я не нашёл этого в памяти». Do not invent facts, documents, or file contents.",
+                  "Do not promise that any specific file has already been processed or is available unless its extracted text or summary is actually included in this request.",
+                  "If the user asks about a document or file whose extracted text was not passed in this prompt, say that you do not have that document's data in the current context right now — do not guess its contents.",
+                  "If file content or images are attached to this request, treat them as available inputs. Do not claim you cannot access an attached file or image.",
+                  "Uploaded Excel (.xls/.xlsx) files are parsed into sheet names, headers, and rows. When spreadsheet extracted content appears in the file context below, answer using that data — describe sheets, columns, and values concretely.",
+                  "For spreadsheet cell data, use exact cell addresses (e.g. B2, G7) and column letters from the extracted content. Never invent __EMPTY headers or guess column names from numeric values.",
+                  "When the user asks about a previously uploaded spreadsheet or table, use retrieved document context from memory search. Do not say you cannot read Excel if extracted content is present in this prompt.",
+                  "When the user shares durable personal information, respond briefly and naturally. Often a short acknowledgement is enough.",
+                  "For personal questions, use the memory context and the visible conversation history above the latest user message.",
+                  "If the user already stated their name or personal details in this chat or in the memory context, use them. Never claim they did not mention something that appears in the conversation or memory context.",
+                  "Do not mention databases, storage backends, retrieval pipelines, prompts, or internal architecture to the user unless they explicitly ask how tBrain works.",
+                  "This app can generate images through a separate image endpoint when the user asks to draw, create, or generate a picture. If they ask for image generation in plain chat without triggering it, suggest rephrasing with phrases like «нарисуй…» or «сгенерируй картинку…».",
+                  "This app cannot create downloadable Excel or Word files for download in chat. Reading and analyzing uploaded spreadsheets is supported when their extracted content is included below.",
+                  "If the user asks which model you are using, answer that this deployment uses the OpenAI API model " +
+                    chatModel +
+                    ".",
+                  "Respond in the user's language."
+                ].join(" ")
+              },
+              {
+                role: "system",
+                content: [
+                  `Retrieved long-term memory context. Use when relevant.\n${memoryPrompt}`,
+                  identityHint
+                ]
+                  .filter(Boolean)
+                  .join("\n\n")
+              },
+              ...(documentsPrompt
+                ? [
+                    {
+                      role: "system" as const,
+                      content: `File context for this request (attached files and/or matching saved documents). Use when relevant.\n${documentsPrompt}`
+                    }
+                  ]
+                : []),
+              ...(referencedChatsPrompt
+                ? [
+                    {
+                      role: "system" as const,
+                      content: `Referenced chats linked by Anton. Use this history when answering about those conversations.\n${referencedChatsPrompt}`
+                    }
+                  ]
+                : []),
+              ...shortTermMessages,
+              { role: "user", content: userContent }
+            ]
+          });
+
+          for await (const chunk of completion) {
+            const token = chunk.choices[0]?.delta?.content ?? "";
+            if (!token) continue;
+            answer += token;
+            controller.enqueue(encoder.encode(token));
+          }
+        });
 
         const finalAnswer = answer.trim();
         if (finalAnswer) {
-          const assistantMessageId = await saveMessage(
-            "assistant",
-            finalAnswer,
-            {
-              reply_to_message_id: userMessageId,
-              document_ids: attachedDocumentIds
-            },
-            conversationId
-          );
-          await linkDocumentsToMessage({
-            messageId: assistantMessageId,
-            documentIds: attachedDocumentIds,
-            relationType: "used_in_answer"
+          await profiler.measure("databaseWriteMs", async () => {
+            const assistantMessageId = await saveMessage(
+              "assistant",
+              finalAnswer,
+              {
+                reply_to_message_id: userMessageId,
+                document_ids: attachedDocumentIds
+              },
+              conversationId
+            );
+            await linkDocumentsToMessage({
+              messageId: assistantMessageId,
+              documentIds: attachedDocumentIds,
+              relationType: "used_in_answer"
+            });
+            await touchConversation(conversationId);
           });
-          await maybeGenerateConversationTitle({
+
+          scheduleChatPostProcessing({
             conversationId,
             userMessage,
-            assistantAnswer: finalAnswer
+            assistantAnswer: finalAnswer,
+            userMessageId,
+            runMemoryExtraction: extractAndSaveMemory
           });
-          await extractAndSaveMemory(userMessage, finalAnswer, userMessageId);
-          await touchConversation(conversationId);
         }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Unexpected streaming error.";
         controller.enqueue(encoder.encode(`\n\nОшибка: ${message}`));
       } finally {
+        profiler.finish({ conversationId, route: "chat" });
         controller.close();
       }
     }
@@ -205,8 +264,7 @@ async function extractAndSaveMemory(
   assistantAnswer: string,
   sourceMessageId?: string | number
 ) {
-  try {
-    const result = await getOpenAI().chat.completions.create({
+  const result = await getOpenAI().chat.completions.create({
       model: chatModel,
       temperature: 0,
       response_format: { type: "json_object" },
@@ -232,12 +290,9 @@ async function extractAndSaveMemory(
       ]
     });
 
-    const raw = result.choices[0]?.message.content ?? "{}";
-    const extraction = normalizeExtraction(JSON.parse(raw));
-    if (extraction) await saveExtractedMemory(extraction, sourceMessageId);
-  } catch (error) {
-    console.error("Memory extraction failed:", error);
-  }
+  const raw = result.choices[0]?.message.content ?? "{}";
+  const extraction = normalizeExtraction(JSON.parse(raw));
+  if (extraction) await saveExtractedMemory(extraction, sourceMessageId);
 }
 
 function normalizeExtraction(value: unknown): MemoryExtraction {

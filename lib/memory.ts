@@ -19,6 +19,12 @@ const SEARCH_POOL_LIMIT = 50;
 const IDENTITY_QUERY =
   /(?:как\s+(?:меня\s+)?(?:зовут|звать)|мо[её]\s+имя|what(?:'s| is)\s+my\s+name|who\s+am\s+i)/i;
 
+const NAME_PATTERNS = [
+  /(?:меня\s+(?:зовут|звать)|my\s+name\s+is|call\s+me)\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]{1,30})/iu,
+  /(?:имя\s+пользователя|user(?:'s)?\s+name|name)\s*:\s*([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]{1,30})/iu,
+  /(?:я\s+[-—–,]\s*|^я\s+)([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]{1,30})\s*$/iu
+] as const;
+
 function compactRecord(record: Record<string, unknown>) {
   return Object.entries(record)
     .filter(([, value]) => value !== null && value !== undefined && value !== "")
@@ -136,12 +142,111 @@ async function searchHistoricalMessages(
 
 export function detectNameFromTexts(texts: string[]) {
   for (const text of texts) {
-    const match = text.match(
-      /(?:меня\s+(?:зовут|звать)|my\s+name\s+is|call\s+me|я\s+[-—–]?\s*)\s*([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]{1,30})/iu
-    );
-    if (match?.[1]) return match[1].trim();
+    const trimmed = text.trim();
+    if (!trimmed) continue;
+
+    for (const pattern of NAME_PATTERNS) {
+      const match = trimmed.match(pattern);
+      if (match?.[1]) {
+        const name = match[1].trim();
+        if (!isLikelyNameToken(name)) continue;
+        return name;
+      }
+    }
   }
   return null;
+}
+
+function isLikelyNameToken(value: string) {
+  const normalized = value.toLowerCase();
+  return ![
+    "не",
+    "тут",
+    "здесь",
+    "пользователь",
+    "user",
+    "человек",
+    "assistant",
+    "chatgpt",
+    "tbrain"
+  ].includes(normalized);
+}
+
+export function resolveUserNameFromMemory(memory: MemoryContext) {
+  const texts = [
+    ...memory.facts.map((record) => String(record.content ?? record.fact ?? "")),
+    ...memory.entities
+      .filter((record) => isPersonEntity(record))
+      .map((record) => String(record.name ?? "")),
+    ...memory.historicalMessages.map((record) => String(record.content ?? "")),
+    ...memory.recentMessages.map((record) => String(record.content ?? ""))
+  ];
+
+  return detectNameFromTexts(texts);
+}
+
+export async function getStoredUserName() {
+  const supabase = getSupabase();
+
+  const [factsResult, entitiesResult, messagesResult] = await Promise.all([
+    supabase
+      .from("facts")
+      .select("content, fact")
+      .or(
+        [
+          "content.ilike.%имя пользователя%",
+          "fact.ilike.%имя пользователя%",
+          "content.ilike.%зовут%",
+          "fact.ilike.%зовут%",
+          "content.ilike.%my name%",
+          "fact.ilike.%my name%"
+        ].join(",")
+      )
+      .order("created_at", { ascending: false })
+      .limit(24),
+    supabase
+      .from("entities")
+      .select("name, type, description")
+      .or("type.ilike.%person%,type.ilike.%user%,description.ilike.%пользователь%")
+      .order("created_at", { ascending: false })
+      .limit(24),
+    supabase
+      .from("messages")
+      .select("content")
+      .eq("role", "user")
+      .or(
+        [
+          "content.ilike.%меня зовут%",
+          "content.ilike.%меня звать%",
+          "content.ilike.%my name is%",
+          "content.ilike.%call me%",
+          "content.ilike.%я %"
+        ].join(",")
+      )
+      .order("created_at", { ascending: false })
+      .limit(24)
+  ]);
+
+  for (const result of [factsResult, entitiesResult, messagesResult]) {
+    if (result.error) {
+      console.error("Stored user name lookup failed:", result.error.message);
+    }
+  }
+
+  const fromFacts = detectNameFromTexts(
+    (factsResult.data ?? []).map((record) => String(record.content ?? record.fact ?? ""))
+  );
+  if (fromFacts) return fromFacts;
+
+  for (const entity of entitiesResult.data ?? []) {
+    if (!isPersonEntity(entity)) continue;
+    const name = String(entity.name ?? "").trim();
+    if (name && isLikelyNameToken(name)) return name;
+  }
+
+  return detectNameFromTexts(
+    (messagesResult.data ?? []).map((record) => String(record.content ?? ""))
+  );
 }
 
 async function searchFactsByTerms(terms: string[]) {
@@ -265,10 +370,12 @@ export async function saveExplicitProfileFromMessage(
   sourceMessageId?: string | number
 ) {
   const trimmed = message.trim();
-  const nameMatch = trimmed.match(
-    /(?:меня\s+(?:зовут|звать)|my\s+name\s+is|call\s+me)\s+([A-Za-zА-Яа-яЁё\-]+)/iu
-  );
-  if (!nameMatch?.[1]) return;
+  const nameMatch =
+    trimmed.match(
+      /(?:меня\s+(?:зовут|звать)|my\s+name\s+is|call\s+me)\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]+)/iu
+    ) ??
+    trimmed.match(/(?:^|\s)я\s+[-—–,]?\s*([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-]+)\s*$/iu);
+  if (!nameMatch?.[1] || !isLikelyNameToken(nameMatch[1])) return;
 
   const name = nameMatch[1].trim();
   await saveExtractedMemory(
@@ -331,6 +438,10 @@ function isIdentityQuery(query: string) {
   return IDENTITY_QUERY.test(query.trim());
 }
 
+export function isUserIdentityQuery(query: string) {
+  return isIdentityQuery(query);
+}
+
 function isProfileLikeRecord(record: Record<string, unknown>) {
   const text = compactRecord(record).toLowerCase();
   return /имя|зовут|звать|фамил|name|call me|меня зовут|user name|пользователя/.test(text);
@@ -376,50 +487,111 @@ export async function saveMessage(
   if (conversationId && String(conversationId) !== "legacy") {
     payload.conversation_id = conversationId;
   }
-  let { data, error } = await supabase
-    .from("messages")
-    .insert(payload)
-    .select("id")
-    .single();
+  let lastError: Error | null = null;
 
-  if (error && /metadata|conversation_id/i.test(error.message)) {
-    const fallback = await supabase
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let { data, error } = await supabase
       .from("messages")
-      .insert({ role, content })
+      .insert(payload)
       .select("id")
       .single();
-    data = fallback.data;
-    error = fallback.error;
+
+    if (error && /metadata|conversation_id/i.test(error.message)) {
+      const fallback = await supabase
+        .from("messages")
+        .insert({ role, content })
+        .select("id")
+        .single();
+      data = fallback.data;
+      error = fallback.error;
+    }
+
+    if (!error) {
+      return data?.id as string | number | undefined;
+    }
+
+    lastError = new Error(`Could not save ${role} message: ${error.message}`);
+    if (!/fetch failed|timeout|ECONNRESET|ETIMEDOUT/i.test(error.message)) {
+      throw lastError;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 500 * (attempt + 1)));
   }
+
+  throw lastError ?? new Error(`Could not save ${role} message.`);
+}
+
+export async function patchMessageMetadata(
+  messageId: string | number,
+  patch: Record<string, unknown>
+) {
+  const supabase = getSupabase();
+  const { data, error: readError } = await supabase
+    .from("messages")
+    .select("metadata")
+    .eq("id", messageId)
+    .maybeSingle();
+
+  if (readError) {
+    throw new Error(`Could not read message metadata: ${readError.message}`);
+  }
+
+  const current =
+    data?.metadata && typeof data.metadata === "object" && !Array.isArray(data.metadata)
+      ? (data.metadata as Record<string, unknown>)
+      : {};
+
+  const { error } = await supabase
+    .from("messages")
+    .update({ metadata: { ...current, ...patch } })
+    .eq("id", messageId);
 
   if (error) {
-    throw new Error(`Could not save ${role} message: ${error.message}`);
+    throw new Error(`Could not update message metadata: ${error.message}`);
   }
-
-  return data?.id as string | number | undefined;
 }
 
 export async function saveExtractedMemory(
   extraction: MemoryExtraction,
-  sourceMessageId?: string | number
+  source?: string | number | { sourceMessageId?: string | number; documentId?: string | number; fileName?: string }
 ) {
+  let sourceMessageId: string | number | undefined;
+  let documentMetadata: Record<string, unknown> | undefined;
+
+  if (typeof source === "object" && source !== null) {
+    sourceMessageId = source.sourceMessageId;
+    if (source.documentId != null) {
+      documentMetadata = {
+        document_id: source.documentId,
+        source_file: source.fileName ?? null,
+        source: "document_upload"
+      };
+    }
+  } else {
+    sourceMessageId = source;
+  }
+
   if (extraction.facts?.length) {
     const facts = await filterNewFacts(extraction.facts);
     await insertWithFallbacks(
       "facts",
       facts.map((fact) => ({
         content: fact.content,
-        source_message_id: sourceMessageId
+        source_message_id: sourceMessageId,
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       })),
       facts.map((fact) => ({
-        content: fact.content
+        content: fact.content,
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       })),
       facts.map((fact) => ({
         fact: fact.content,
-        source_message_id: sourceMessageId
+        source_message_id: sourceMessageId,
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       })),
       facts.map((fact) => ({
-        fact: fact.content
+        fact: fact.content,
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       }))
     );
   }
@@ -432,19 +604,23 @@ export async function saveExtractedMemory(
         name: entity.name,
         type: entity.type ?? "unknown",
         description: entity.description ?? null,
-        source_message_id: sourceMessageId
+        source_message_id: sourceMessageId,
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       })),
       entities.map((entity) => ({
         name: entity.name,
         type: entity.type ?? "unknown",
-        source_message_id: sourceMessageId
+        source_message_id: sourceMessageId,
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       })),
       entities.map((entity) => ({
         name: entity.name,
-        type: entity.type ?? "unknown"
+        type: entity.type ?? "unknown",
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       })),
       entities.map((entity) => ({
-        name: entity.name
+        name: entity.name,
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       }))
     );
   }
@@ -456,19 +632,23 @@ export async function saveExtractedMemory(
         title: task.title,
         status: task.status ?? "open",
         description: task.description ?? null,
-        source_message_id: sourceMessageId
+        source_message_id: sourceMessageId,
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       })),
       extraction.tasks.map((task) => ({
         title: task.title,
         status: task.status ?? "open",
-        source_message_id: sourceMessageId
+        source_message_id: sourceMessageId,
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       })),
       extraction.tasks.map((task) => ({
         title: task.title,
-        status: task.status ?? "open"
+        status: task.status ?? "open",
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       })),
       extraction.tasks.map((task) => ({
-        title: task.title
+        title: task.title,
+        ...(documentMetadata ? { metadata: documentMetadata } : {})
       }))
     );
   }

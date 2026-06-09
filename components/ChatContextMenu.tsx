@@ -1,6 +1,6 @@
 "use client";
 
-import { FolderPlus } from "lucide-react";
+import { FolderPlus, FileText, Link2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 type ChatContextMenuProps = {
@@ -8,9 +8,18 @@ type ChatContextMenuProps = {
   y: number;
   onClose: () => void;
   onCreateProject: () => void;
+  onCopyLink: () => void;
+  onOpenFiles: () => void;
 };
 
-export function ChatContextMenu({ x, y, onClose, onCreateProject }: ChatContextMenuProps) {
+export function ChatContextMenu({
+  x,
+  y,
+  onClose,
+  onCreateProject,
+  onCopyLink,
+  onOpenFiles
+}: ChatContextMenuProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -51,6 +60,28 @@ export function ChatContextMenu({ x, y, onClose, onCreateProject }: ChatContextM
 
   return (
     <div className="chat-context-menu" ref={menuRef} role="menu" style={{ left: x, top: y }}>
+      <button
+        onClick={() => {
+          onCopyLink();
+          onClose();
+        }}
+        role="menuitem"
+        type="button"
+      >
+        <Link2 size={15} />
+        Копировать ссылку
+      </button>
+      <button
+        onClick={() => {
+          onOpenFiles();
+          onClose();
+        }}
+        role="menuitem"
+        type="button"
+      >
+        <FileText size={15} />
+        Файлы чата
+      </button>
       <button
         onClick={() => {
           onCreateProject();

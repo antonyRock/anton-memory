@@ -1,4 +1,11 @@
 import { getDocumentsForMessages } from "@/lib/documents";
+import { getCurrentUserId } from "@/lib/users";
+import {
+  metadataHasHeavyPayload,
+  normalizeRecordMetadata,
+  resolveStoredImageUrl,
+  sanitizeMessageMetadataForClient
+} from "@/lib/client-payload";
 import { getOpenAI, chatModel } from "@/lib/openai";
 import { searchProjects } from "@/lib/projects";
 import { getSupabase } from "@/lib/supabase";
@@ -18,8 +25,13 @@ export type SearchResultItem = {
   typeLabel: string;
   id: string | number;
   conversationId?: string | number | null;
+  documentId?: string | number | null;
   title: string;
   snippet: string;
+  fileName?: string;
+  conversationTitle?: string;
+  projectTitle?: string;
+  matchText?: string;
 };
 
 const DEFAULT_TITLE = "Новый чат";
@@ -77,7 +89,7 @@ export async function listConversations(search = "", projectId?: string | number
         .limit(20),
       supabase
         .from("documents")
-        .select("id, file_name, extracted_text, summary, created_at")
+        .select("id, file_name, file_type, metadata, extracted_text, summary, created_at")
         .or(`file_name.ilike.${pattern},extracted_text.ilike.${pattern},summary.ilike.${pattern}`)
         .order("created_at", { ascending: false })
         .limit(10),
@@ -164,6 +176,28 @@ export async function listConversations(search = "", projectId?: string | number
   const conversationTitleById = new Map(
     conversations.map((conversation) => [String(conversation.id), conversation.title ?? "Чат"])
   );
+  const conversationProjectIdById = new Map(
+    conversations.map((conversation) => [String(conversation.id), conversation.project_id ?? null])
+  );
+
+  const projectIds = [
+    ...new Set(
+      conversations
+        .map((conversation) => conversation.project_id)
+        .filter((id) => id != null && id !== "")
+        .map(String)
+    )
+  ];
+  const projectTitleById = new Map<string, string>();
+  if (projectIds.length > 0) {
+    const { data: projectRows } = await supabase
+      .from("projects")
+      .select("id, title")
+      .in("id", projectIds);
+    for (const project of projectRows ?? []) {
+      projectTitleById.set(String(project.id), String(project.title ?? "Проект"));
+    }
+  }
 
   const results = [
     ...toResults("conversation", conversationMatches.data, "summary", "title"),
@@ -173,7 +207,11 @@ export async function listConversations(search = "", projectId?: string | number
       documentMatches.data,
       "extracted_text",
       "file_name",
-      documentConversationIds
+      documentConversationIds,
+      query,
+      conversationTitleById,
+      conversationProjectIdById,
+      projectTitleById
     ),
     ...toResults("fact", factMatches.data, "content", "fact"),
     ...toResults("entity", entityMatches.data, "description", "name"),
@@ -182,7 +220,9 @@ export async function listConversations(search = "", projectId?: string | number
   ].map((result) => {
     if (result.type !== "message" || !result.conversationId) return result;
     const chatTitle = conversationTitleById.get(String(result.conversationId));
-    return chatTitle ? { ...result, snippet: `Чат: ${chatTitle}` } : result;
+    return chatTitle
+      ? { ...result, conversationTitle: chatTitle, title: chatTitle, snippet: `Чат: ${chatTitle}` }
+      : result;
   }) as SearchResultItem[];
 
   return {
@@ -198,7 +238,8 @@ export async function createConversation(
   projectId?: string | number | null
 ) {
   const supabase = getSupabase();
-  const basePayload: Record<string, unknown> = { title };
+  const userId = getCurrentUserId();
+  const basePayload: Record<string, unknown> = { title, user_id: userId };
   const payload =
     projectId != null && projectId !== ""
       ? { ...basePayload, project_id: projectId }
@@ -207,13 +248,33 @@ export async function createConversation(
   let { data, error } = await supabase
     .from("conversations")
     .insert(payload)
-    .select(CONVERSATION_SELECT_BASE)
+    .select(CONVERSATION_SELECT_WITH_PROJECT)
     .single();
+
+  if (error && /user_id/i.test(error.message)) {
+    const legacyPayload: Record<string, unknown> =
+      projectId != null && projectId !== ""
+        ? { title, project_id: projectId }
+        : { title };
+    ({ data, error } = await supabase
+      .from("conversations")
+      .insert(legacyPayload)
+      .select(CONVERSATION_SELECT_WITH_PROJECT)
+      .single());
+  }
 
   if (error && projectId != null && /project_id/i.test(error.message)) {
     ({ data, error } = await supabase
       .from("conversations")
-      .insert(basePayload)
+      .insert({ title, user_id: userId })
+      .select(CONVERSATION_SELECT_BASE)
+      .single());
+  }
+
+  if (error && projectId != null && /project_id|user_id/i.test(error.message)) {
+    ({ data, error } = await supabase
+      .from("conversations")
+      .insert({ title })
       .select(CONVERSATION_SELECT_BASE)
       .single());
   }
@@ -221,6 +282,126 @@ export async function createConversation(
   if (isMissingConversationSchema(error?.message)) return LEGACY_CONVERSATION;
   if (error) throw new Error(`Could not create conversation: ${error.message}`);
   return data as Conversation;
+}
+
+export async function updateConversationTitle(
+  conversationId: string | number,
+  title: string
+) {
+  const supabase = getSupabase();
+  const trimmed = title.trim().slice(0, 80);
+  if (!trimmed) throw new Error("Title is required.");
+
+  let { data, error } = await supabase
+    .from("conversations")
+    .update({ title: trimmed, updated_at: new Date().toISOString() })
+    .select(CONVERSATION_SELECT_WITH_PROJECT)
+    .eq("id", conversationId)
+    .single();
+
+  if (error && /project_id/i.test(error.message)) {
+    ({ data, error } = await supabase
+      .from("conversations")
+      .update({ title: trimmed, updated_at: new Date().toISOString() })
+      .select(CONVERSATION_SELECT_BASE)
+      .eq("id", conversationId)
+      .single());
+  }
+
+  if (error) throw new Error(`Could not rename conversation: ${error.message}`);
+  return data as Conversation;
+}
+
+export async function updateConversationPinned(
+  conversationId: string | number,
+  pinned: boolean
+) {
+  const supabase = getSupabase();
+  const { data: current, error: readError } = await supabase
+    .from("conversations")
+    .select("metadata")
+    .eq("id", conversationId)
+    .single();
+
+  if (readError) throw new Error(`Could not read conversation metadata: ${readError.message}`);
+
+  const metadata = normalizeRecordMetadata(current?.metadata);
+  const nextMetadata = { ...metadata };
+
+  if (pinned) {
+    nextMetadata.pinned = true;
+    nextMetadata.pinned_at = new Date().toISOString();
+  } else {
+    delete nextMetadata.pinned;
+    delete nextMetadata.pinned_at;
+  }
+
+  let { data, error } = await supabase
+    .from("conversations")
+    .update({
+      metadata: nextMetadata,
+      updated_at: new Date().toISOString()
+    })
+    .select(CONVERSATION_SELECT_WITH_PROJECT)
+    .eq("id", conversationId)
+    .single();
+
+  if (error && /project_id/i.test(error.message)) {
+    ({ data, error } = await supabase
+      .from("conversations")
+      .update({
+        metadata: nextMetadata,
+        updated_at: new Date().toISOString()
+      })
+      .select(CONVERSATION_SELECT_BASE)
+      .eq("id", conversationId)
+      .single());
+  }
+
+  if (error) throw new Error(`Could not update conversation pin: ${error.message}`);
+  return data as Conversation;
+}
+
+export async function getConversationMessageTexts(conversationId: string | number) {
+  const supabase = getSupabase();
+  const query =
+    String(conversationId) === "legacy"
+      ? supabase
+          .from("messages")
+          .select("role, content")
+          .order("created_at", { ascending: true })
+          .limit(200)
+      : supabase
+          .from("messages")
+          .select("role, content")
+          .eq("conversation_id", conversationId)
+          .order("created_at", { ascending: true })
+          .limit(200);
+
+  const { data, error } = await query;
+  if (error) throw new Error(`Could not load messages: ${error.message}`);
+  return data ?? [];
+}
+
+async function cleanupHeavyMessageMetadata(
+  messages: Array<{ id: string | number; metadata?: unknown }>
+) {
+  const supabase = getSupabase();
+
+  for (const message of messages) {
+    const metadata = normalizeRecordMetadata(message.metadata);
+    if (!metadataHasHeavyPayload(metadata)) continue;
+
+    void supabase
+      .from("messages")
+      .update({ metadata: sanitizeMessageMetadataForClient(metadata) })
+      .eq("id", message.id)
+      .then(({ error }) => {
+        if (error) {
+          console.error("Could not cleanup heavy message metadata:", error.message);
+        }
+      });
+  }
 }
 
 export async function getConversationMessages(conversationId: string | number) {
@@ -242,7 +423,11 @@ export async function getConversationMessages(conversationId: string | number) {
   const { data, error } = await query;
   if (error) throw new Error(`Could not load messages: ${error.message}`);
 
-  const messages = data ?? [];
+  const messages = (data ?? []).map((message) => ({
+    ...message,
+    metadata: sanitizeMessageMetadataForClient(normalizeRecordMetadata(message.metadata))
+  }));
+  void cleanupHeavyMessageMetadata(messages);
   const documentsByMessage = await getDocumentsForMessages(messages);
 
   return messages.map((message) => {
@@ -250,18 +435,34 @@ export async function getConversationMessages(conversationId: string | number) {
     const generatedImage = attachments.find(
       (attachment) => attachment.metadata?.kind === "generated_image"
     );
+    const metadata = normalizeRecordMetadata(message.metadata) as {
+      generated_document_id?: string | number;
+      image_preview_url?: string;
+    };
+
+    const imageUrl = resolveStoredImageUrl({
+      generatedDocumentId: metadata.generated_document_id,
+      imagePreviewUrl:
+        typeof metadata.image_preview_url === "string" ? metadata.image_preview_url : null,
+      attachmentPreviewUrl: generatedImage?.previewUrl ?? null,
+      attachmentFullUrl: generatedImage?.fullUrl ?? null
+    });
 
     return {
-      ...message,
+      id: message.id,
+      role: message.role,
+      content: message.content,
+      created_at: message.created_at,
       attachments,
-      imageUrl: generatedImage?.previewUrl ?? generatedImage?.fullUrl ?? null
+      imageUrl,
+      metadata: sanitizeMessageMetadataForClient(metadata)
     };
   });
 }
 
 export async function getShortTermContext(conversationId?: string | number) {
   if (!conversationId) return [];
-  const messages = await getConversationMessages(conversationId);
+  const messages = await getConversationMessageTexts(conversationId);
   return messages
     .filter((message) => message.role === "user" || message.role === "assistant")
     .slice(-12)
@@ -294,6 +495,34 @@ export function mergeShortTermContext(
   }
 
   return merged.slice(-12);
+}
+
+export async function getReferencedConversationsContext(ids: Array<string | number>) {
+  if (ids.length === 0) return "";
+
+  const supabase = getSupabase();
+  const uniqueIds = [...new Set(ids.map((id) => String(id)))];
+  const blocks: string[] = [];
+
+  for (const id of uniqueIds) {
+    const [{ data: conversation }, messages] = await Promise.all([
+      supabase.from("conversations").select("id, title").eq("id", id).maybeSingle(),
+      getConversationMessageTexts(id)
+    ]);
+
+    const title = String(conversation?.title ?? `Чат ${id}`).trim() || `Чат ${id}`;
+    const excerpt = messages
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .slice(-16)
+      .map((message) => `${message.role}: ${String(message.content ?? "").slice(0, 800)}`)
+      .join("\n");
+
+    if (!excerpt) continue;
+
+    blocks.push(`Чат #${id} «${title}»:\n${excerpt}`);
+  }
+
+  return blocks.join("\n\n---\n\n");
 }
 
 export async function touchConversation(conversationId?: string | number) {
@@ -408,7 +637,11 @@ function toResults(
   rows: Record<string, unknown>[] | null,
   textKey: string,
   nameKey?: string,
-  conversationIdsByRowId?: Map<string, string | number | null>
+  conversationIdsByRowId?: Map<string, string | number | null>,
+  query = "",
+  conversationTitleById?: Map<string, string>,
+  conversationProjectIdById?: Map<string, string | number | null>,
+  projectTitleById?: Map<string, string>
 ): SearchResultItem[] {
   return (rows ?? []).map((row) => {
     const resolvedType = resolveResultType(type, row);
@@ -447,7 +680,7 @@ function toResults(
       conversationIdsByRowId?.get(String(row.id ?? "")) ??
       (resolvedType === "conversation" ? (row.id as string | number) : null);
 
-    return {
+    const base: SearchResultItem = {
       type: resolvedType,
       typeLabel,
       id: (row.id ?? row.conversation_id ?? crypto.randomUUID()) as string | number,
@@ -455,7 +688,64 @@ function toResults(
       title,
       snippet: snippet.slice(0, 180)
     };
+
+    if (resolvedType !== "document" && resolvedType !== "image") {
+      return base;
+    }
+
+    const conversationTitle =
+      conversationId != null
+        ? conversationTitleById?.get(String(conversationId)) ?? undefined
+        : undefined;
+    const projectId =
+      conversationId != null
+        ? conversationProjectIdById?.get(String(conversationId)) ?? null
+        : null;
+    const projectTitle =
+      projectId != null ? projectTitleById?.get(String(projectId)) ?? undefined : undefined;
+    const fileName = nameValue || "Файл";
+    const queryLower = query.trim().toLowerCase();
+    const nameMatches = queryLower.length > 0 && fileName.toLowerCase().includes(queryLower);
+    const contentMatches =
+      queryLower.length > 0 && textValue.toLowerCase().includes(queryLower);
+    const matchText =
+      contentMatches && textValue ? extractMatchSnippet(textValue, query) : undefined;
+
+    const snippetParts: string[] = [];
+    if (projectTitle) snippetParts.push(`Проект: ${projectTitle}`);
+    if (conversationTitle) snippetParts.push(`Чат: ${conversationTitle}`);
+    if (matchText && !nameMatches) snippetParts.push(`Совпадение: ${matchText}`);
+    else if (matchText && nameMatches && contentMatches) {
+      snippetParts.push(`Совпадение: ${matchText}`);
+    }
+
+    return {
+      ...base,
+      documentId: row.id as string | number,
+      fileName,
+      conversationTitle,
+      projectTitle,
+      matchText,
+      title: fileName,
+      snippet: snippetParts.join(" · ") || base.snippet
+    };
   });
+}
+
+function extractMatchSnippet(text: string, query: string, radius = 48) {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery) return text.slice(0, 120);
+
+  const lowerText = text.toLowerCase();
+  const lowerQuery = trimmedQuery.toLowerCase();
+  const index = lowerText.indexOf(lowerQuery);
+  if (index === -1) return text.slice(0, 120);
+
+  const start = Math.max(0, index - radius);
+  const end = Math.min(text.length, index + trimmedQuery.length + radius);
+  const prefix = start > 0 ? "…" : "";
+  const suffix = end < text.length ? "…" : "";
+  return `${prefix}${text.slice(start, end).replace(/\s+/g, " ").trim()}${suffix}`;
 }
 
 function resolveResultType(type: string, row: Record<string, unknown>) {

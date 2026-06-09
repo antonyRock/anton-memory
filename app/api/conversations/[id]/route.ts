@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { updateConversationPinned, updateConversationTitle } from "@/lib/conversations";
 import { assignConversationToProject } from "@/lib/projects";
 
 export const runtime = "nodejs";
@@ -12,15 +13,25 @@ export async function PATCH(request: Request, context: RouteContext) {
     const { id } = await context.params;
     const body = await request.json();
 
-    if (!("projectId" in body)) {
-      return NextResponse.json({ error: "projectId is required." }, { status: 400 });
+    if (typeof body.title === "string") {
+      const conversation = await updateConversationTitle(id, body.title);
+      return NextResponse.json({ conversation });
     }
 
-    const conversation = await assignConversationToProject(
-      id,
-      body.projectId === null || body.projectId === undefined ? null : body.projectId
-    );
-    return NextResponse.json({ conversation });
+    if (typeof body.pinned === "boolean") {
+      const conversation = await updateConversationPinned(id, body.pinned);
+      return NextResponse.json({ conversation });
+    }
+
+    if ("projectId" in body) {
+      const conversation = await assignConversationToProject(
+        id,
+        body.projectId === null || body.projectId === undefined ? null : body.projectId
+      );
+      return NextResponse.json({ conversation });
+    }
+
+    return NextResponse.json({ error: "title, pinned, or projectId is required." }, { status: 400 });
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Unexpected conversation update error.";

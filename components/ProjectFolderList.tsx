@@ -6,15 +6,18 @@ import {
   Folder,
   FolderOpen,
   MoreHorizontal,
+  Pin,
   Plus
 } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { isConversationPinned, sortConversationsForSidebar } from "@/lib/chat-pins";
 
 type Conversation = {
   id: string | number;
   title: string | null;
   project_id?: string | number | null;
   summary?: string | null;
+  metadata?: Record<string, unknown> | null;
   created_at?: string;
   updated_at?: string;
 };
@@ -33,6 +36,7 @@ type ProjectFolderListProps = {
   draggingConversationId: string | number | null;
   dropTargetProjectId: string | "general" | null;
   onCreateProject: () => void;
+  onOpenProject: (projectId: string | number) => void;
   onToggleProject: (projectId: string | number) => void;
   onOpenMenu: (projectId: string | number) => void;
   onCloseMenu: () => void;
@@ -63,6 +67,7 @@ export function ProjectFolderList({
   draggingConversationId,
   dropTargetProjectId,
   onCreateProject,
+  onOpenProject,
   onToggleProject,
   onOpenMenu,
   onCloseMenu,
@@ -137,8 +142,10 @@ export function ProjectFolderList({
         {projects.map((project) => {
           const projectKey = String(project.id);
           const isExpanded = expandedProjectIds[projectKey] ?? false;
-          const projectConversations = conversations.filter(
-            (conversation) => String(conversation.project_id) === projectKey
+          const projectConversations = sortConversationsForSidebar(
+            conversations.filter(
+              (conversation) => String(conversation.project_id) === projectKey
+            )
           );
           const isDropTarget = dropTargetProjectId === projectKey;
 
@@ -159,14 +166,21 @@ export function ProjectFolderList({
             >
               <div className="project-folder-header">
                 <button
-                  className="project-folder-toggle"
-                  onClick={() => {
-                    if (renamingProjectId === project.id) return;
-                    onToggleProject(project.id);
-                  }}
+                  aria-label={isExpanded ? "Свернуть проект" : "Развернуть проект"}
+                  className="project-folder-chevron"
+                  onClick={() => onToggleProject(project.id)}
                   type="button"
                 >
                   {isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                </button>
+                <button
+                  className="project-folder-open"
+                  onClick={() => {
+                    if (renamingProjectId === project.id) return;
+                    onOpenProject(project.id);
+                  }}
+                  type="button"
+                >
                   <span className="project-folder-icon">
                     {isExpanded ? <FolderOpen size={16} /> : <Folder size={16} />}
                   </span>
@@ -242,7 +256,9 @@ export function ProjectFolderList({
                       <button
                         className={`conversation-item nested ${
                           String(conversation.id) === String(activeConversationId) ? "active" : ""
-                        } ${String(draggingConversationId) === String(conversation.id) ? "is-dragging" : ""}`}
+                        } ${String(draggingConversationId) === String(conversation.id) ? "is-dragging" : ""} ${
+                          isConversationPinned(conversation) ? "is-pinned" : ""
+                        }`}
                         draggable
                         key={conversation.id}
                         onClick={() => onOpenConversation(conversation.id)}
@@ -253,9 +269,12 @@ export function ProjectFolderList({
                         onDragStart={() => onDragConversationStart(conversation.id)}
                         type="button"
                       >
-                        <span>
+                        <span className="conversation-item-title">
                           {conversationTitle(conversation, projectConversations, index)}
                         </span>
+                        {isConversationPinned(conversation) ? (
+                          <Pin aria-hidden className="conversation-pin-icon" size={11} strokeWidth={2} />
+                        ) : null}
                       </button>
                     ))
                   ) : (

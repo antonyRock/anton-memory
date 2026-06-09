@@ -1,4 +1,10 @@
 import * as XLSX from "xlsx";
+import { sanitizeDocumentMetadataForClient } from "@/lib/client-payload";
+import { extractAndSaveDocumentMemory, getDocumentLinkedMemoryForPrompt, searchDocumentIdsByQuery } from "@/lib/document-memory";
+import {
+  parseSpreadsheetWorkbook,
+  spreadsheetFileTypeFromName
+} from "@/lib/spreadsheet-parse";
 import { getSupabase } from "@/lib/supabase";
 
 export type StoredDocument = {
@@ -29,10 +35,19 @@ export type StoredImageFile = {
   buffer: Buffer;
 };
 
+export function buildDocumentInlineUrl(documentId: string | number) {
+  return `/api/documents/${documentId}/download?inline=1`;
+}
+
 const DOCUMENTS_BUCKET = "documents";
 const MAX_EXTRACTED_TEXT = 80_000;
-const MAX_ROWS_PER_SHEET = 200;
 const MAX_INLINE_IMAGE_BYTES = 2 * 1024 * 1024;
+const MAX_GENERATED_IMAGE_INLINE_BYTES = 3 * 1024 * 1024;
+
+type UploadStorageOptions = {
+  timeoutMs?: number;
+  attempts?: number;
+};
 let pdfWorkerConfigured = false;
 
 function sanitizeStorageText(text: string) {
@@ -83,26 +98,55 @@ async function ensurePdfWorker() {
   pdfWorkerConfigured = true;
 }
 
-async function uploadStorageFile(storagePath: string, bytes: Buffer, contentType: string) {
-  const clientError = await uploadWithSupabaseClient(storagePath, bytes, contentType);
+function encodeStoragePath(storagePath: string) {
+  return storagePath
+    .split("/")
+    .map((segment) => encodeURIComponent(segment))
+    .join("/");
+}
+
+function getStorageObjectUrl(storagePath: string) {
+  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+  if (!supabaseUrl) return null;
+  return `${supabaseUrl.replace(/\/$/, "")}/storage/v1/object/${DOCUMENTS_BUCKET}/${encodeStoragePath(storagePath)}`;
+}
+
+function getStorageUploadUrl(storagePath: string) {
+  return getStorageObjectUrl(storagePath);
+}
+
+async function uploadStorageFile(
+  storagePath: string,
+  bytes: Buffer,
+  contentType: string,
+  options: UploadStorageOptions = {}
+) {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const attempts = options.attempts ?? 3;
+
+  const clientError = await uploadWithSupabaseClient(storagePath, bytes, contentType, attempts);
   if (!clientError) return;
 
-  const restError = await uploadWithRestApi(storagePath, bytes, contentType);
+  const restError = await uploadWithRestApi(storagePath, bytes, contentType, timeoutMs, attempts);
   if (!restError) return;
 
-  throw new Error(`Could not upload file to storage: ${restError || clientError}`);
+  const httpsError = await uploadWithNodeHttps(storagePath, bytes, contentType, timeoutMs);
+  if (!httpsError) return;
+
+  throw new Error(`Could not upload file to storage: ${httpsError || restError || clientError}`);
 }
 
 async function uploadWithSupabaseClient(
   storagePath: string,
   bytes: Buffer,
-  contentType: string
+  contentType: string,
+  attempts: number
 ) {
   const supabase = getSupabase();
   const body = new Uint8Array(bytes);
   let lastMessage = "unknown error";
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const { error } = await supabase.storage.from(DOCUMENTS_BUCKET).upload(storagePath, body, {
         contentType,
@@ -119,31 +163,33 @@ async function uploadWithSupabaseClient(
   return lastMessage;
 }
 
-async function uploadWithRestApi(storagePath: string, bytes: Buffer, contentType: string) {
-  const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+async function uploadWithRestApi(
+  storagePath: string,
+  bytes: Buffer,
+  contentType: string,
+  timeoutMs: number,
+  attempts: number
+) {
   const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !serviceRoleKey) {
+  const url = getStorageUploadUrl(storagePath);
+  if (!url || !serviceRoleKey) {
     return "Supabase env is not configured.";
   }
 
-  const encodedPath = storagePath
-    .split("/")
-    .map((segment) => encodeURIComponent(segment))
-    .join("/");
-  const url = `${supabaseUrl.replace(/\/$/, "")}/storage/v1/object/${DOCUMENTS_BUCKET}/${encodedPath}`;
   let lastMessage = "unknown error";
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await fetch(url, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${serviceRoleKey}`,
           "Content-Type": contentType,
+          "Content-Length": String(bytes.length),
           "x-upsert": attempt > 0 ? "true" : "false"
         },
         body: new Uint8Array(bytes),
-        signal: AbortSignal.timeout(30_000)
+        signal: AbortSignal.timeout(timeoutMs)
       });
 
       if (response.ok) return null;
@@ -159,8 +205,205 @@ async function uploadWithRestApi(storagePath: string, bytes: Buffer, contentType
   return lastMessage;
 }
 
+async function uploadWithNodeHttps(
+  storagePath: string,
+  bytes: Buffer,
+  contentType: string,
+  timeoutMs: number
+) {
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const urlString = getStorageUploadUrl(storagePath);
+  if (!urlString || !serviceRoleKey) {
+    return "Supabase env is not configured.";
+  }
+
+  const { request: httpsRequest } = await import("node:https");
+  const url = new URL(urlString);
+
+  return new Promise<string | null>((resolve) => {
+    const request = httpsRequest(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || 443,
+        path: `${url.pathname}${url.search}`,
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${serviceRoleKey}`,
+          "Content-Type": contentType,
+          "Content-Length": String(bytes.length),
+          "x-upsert": "true"
+        },
+        timeout: timeoutMs
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          const status = response.statusCode ?? 500;
+          if (status >= 200 && status < 300) {
+            resolve(null);
+            return;
+          }
+          const payload = Buffer.concat(chunks).toString("utf8");
+          resolve(payload || `HTTP ${status}`);
+        });
+      }
+    );
+
+    request.on("error", (error) => {
+      resolve(error instanceof Error ? error.message : "upload failed");
+    });
+    request.on("timeout", () => {
+      request.destroy();
+      resolve("upload timed out");
+    });
+    request.write(bytes);
+    request.end();
+  });
+}
+
+async function downloadStorageWithRestApi(storagePath: string) {
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const url = getStorageObjectUrl(storagePath);
+  if (!url || !serviceRoleKey) return null;
+
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${serviceRoleKey}`
+      },
+      signal: AbortSignal.timeout(60_000)
+    });
+
+    if (!response.ok) return null;
+    return Buffer.from(await response.arrayBuffer());
+  } catch (error) {
+    console.error("Storage REST download failed:", error);
+    return null;
+  }
+}
+
+async function downloadStorageWithNodeHttps(storagePath: string) {
+  const serviceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const urlString = getStorageObjectUrl(storagePath);
+  if (!urlString || !serviceRoleKey) return null;
+
+  const { request: httpsRequest } = await import("node:https");
+  const url = new URL(urlString);
+
+  return new Promise<Buffer | null>((resolve) => {
+    const request = httpsRequest(
+      {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        port: url.port || 443,
+        path: `${url.pathname}${url.search}`,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${serviceRoleKey}`
+        },
+        timeout: 60_000
+      },
+      (response) => {
+        const chunks: Buffer[] = [];
+        response.on("data", (chunk: Buffer) => chunks.push(chunk));
+        response.on("end", () => {
+          const status = response.statusCode ?? 500;
+          if (status < 200 || status >= 300) {
+            resolve(null);
+            return;
+          }
+          resolve(Buffer.concat(chunks));
+        });
+      }
+    );
+
+    request.on("error", () => resolve(null));
+    request.on("timeout", () => {
+      request.destroy();
+      resolve(null);
+    });
+    request.end();
+  });
+}
+
+async function downloadStorageFile(storagePath: string) {
+  const supabase = getSupabase();
+
+  try {
+    const { data, error } = await supabase.storage.from(DOCUMENTS_BUCKET).download(storagePath);
+    if (!error && data) return Buffer.from(await data.arrayBuffer());
+  } catch (error) {
+    console.error("Storage client download failed:", error);
+  }
+
+  const restBuffer = await downloadStorageWithRestApi(storagePath);
+  if (restBuffer) return restBuffer;
+
+  return downloadStorageWithNodeHttps(storagePath);
+}
+
+function getDocumentImageBufferFromMetadata(
+  metadata: Record<string, unknown>,
+  fileType: string
+) {
+  const inlineBase64 =
+    typeof metadata.inline_base64 === "string" ? metadata.inline_base64 : null;
+  if (inlineBase64) {
+    return {
+      buffer: Buffer.from(inlineBase64, "base64"),
+      fileType
+    };
+  }
+
+  const thumbnailBase64 =
+    typeof metadata.preview_thumbnail_base64 === "string"
+      ? metadata.preview_thumbnail_base64
+      : null;
+  if (thumbnailBase64) {
+    const thumbnailType =
+      typeof metadata.preview_thumbnail_type === "string"
+        ? metadata.preview_thumbnail_type
+        : "image/jpeg";
+    return {
+      buffer: Buffer.from(thumbnailBase64, "base64"),
+      fileType: thumbnailType
+    };
+  }
+
+  return null;
+}
+
+function buildMetadataImageDataUrl(metadata: Record<string, unknown>, fileType: string) {
+  const inlineBase64 =
+    typeof metadata.inline_base64 === "string" ? metadata.inline_base64 : null;
+  if (inlineBase64) {
+    return `data:${fileType};base64,${inlineBase64}`;
+  }
+
+  const thumbnailBase64 =
+    typeof metadata.preview_thumbnail_base64 === "string"
+      ? metadata.preview_thumbnail_base64
+      : null;
+  if (thumbnailBase64) {
+    const thumbnailType =
+      typeof metadata.preview_thumbnail_type === "string"
+        ? metadata.preview_thumbnail_type
+        : "image/jpeg";
+    return `data:${thumbnailType};base64,${thumbnailBase64}`;
+  }
+
+  return null;
+}
+
 function canStoreImageInline(fileType: string, bytes: Buffer) {
   return fileType.startsWith("image/") && bytes.length <= MAX_INLINE_IMAGE_BYTES;
+}
+
+function canStoreGeneratedImageInline(bytes: Buffer) {
+  return bytes.length <= MAX_GENERATED_IMAGE_INLINE_BYTES;
 }
 
 export async function storedDocumentToAttachment(
@@ -186,7 +429,7 @@ export async function processAndStoreFile(
   const storagePath = `uploads/${Date.now()}-${sanitizeFileName(file.name)}`;
   const extracted = await extractFileText(file, bytes);
   const extractedText = sanitizeStorageText(extracted.text);
-  const summary = summarizeExtractedText(extractedText);
+  const summary = extracted.summary ?? summarizeExtractedText(extractedText);
   const supabase = getSupabase();
   let metadata: Record<string, unknown> = extracted.metadata;
   let savedStoragePath = storagePath;
@@ -229,42 +472,35 @@ export async function processAndStoreFile(
     throw new Error(`Could not save document metadata: ${error.message}`);
   }
 
-  return data as StoredDocument;
+  const stored = data as StoredDocument;
+  void extractAndSaveDocumentMemory({
+    id: stored.id,
+    file_name: stored.file_name,
+    file_type: stored.file_type,
+    extracted_text: stored.extracted_text,
+    summary: stored.summary,
+    metadata: normalizeMetadata(stored.metadata)
+  }).catch((memoryError) => {
+    console.error("Document memory extraction failed:", memoryError);
+  });
+
+  return stored;
 }
 
-export async function storeGeneratedImage(input: {
-  prompt: string;
-  imageBytes: Buffer;
-  sourceDocumentIds?: Array<string | number>;
-}) {
-  const storagePath = `generated/${Date.now()}-${randomId()}.png`;
-  await uploadStorageFile(storagePath, input.imageBytes, "image/png");
+export async function uploadDocumentBytes(
+  storagePath: string,
+  bytes: Buffer,
+  contentType: string,
+  options: UploadStorageOptions = {}
+) {
+  return uploadStorageFile(storagePath, bytes, contentType, options);
+}
 
-  const summary = `Generated image for prompt: ${input.prompt.slice(0, 500)}`;
-  const supabase = getSupabase();
-  const { data, error } = await supabase
-    .from("documents")
-    .insert({
-      file_name: `generated-${Date.now()}.png`,
-      file_type: "image/png",
-      file_size: input.imageBytes.length,
-      storage_path: storagePath,
-      extracted_text: summary,
-      summary,
-      metadata: {
-        kind: "generated_image",
-        prompt: input.prompt,
-        source_document_ids: input.sourceDocumentIds ?? []
-      }
-    })
-    .select("*")
-    .single();
-
-  if (error) {
-    throw new Error(`Could not save generated image metadata: ${error.message}`);
-  }
-
-  return data as StoredDocument;
+export function mergeDocumentMetadata(
+  current: unknown,
+  patch: Record<string, unknown>
+) {
+  return { ...normalizeMetadata(current), ...patch };
 }
 
 export async function storeAudioFile(input: {
@@ -331,6 +567,44 @@ export async function linkDocumentsToMessage(input: {
   }
 }
 
+export async function getDocumentDownloadPayload(documentId: string | number) {
+  const supabase = getSupabase();
+  const { data, error } = await supabase
+    .from("documents")
+    .select("file_name, file_type, storage_path, metadata")
+    .eq("id", documentId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+
+  const metadata = normalizeMetadata(data.metadata);
+  const fileType = String(data.file_type ?? "application/octet-stream");
+  const fromMetadata = getDocumentImageBufferFromMetadata(metadata, fileType);
+  if (fromMetadata) {
+    return {
+      fileName: String(data.file_name ?? "file"),
+      fileType: fromMetadata.fileType,
+      buffer: fromMetadata.buffer
+    };
+  }
+
+  const storagePath = String(data.storage_path ?? "");
+  if (!storagePath) return null;
+
+  const buffer = await downloadStorageFile(storagePath);
+
+  if (!buffer) {
+    console.error("Document download failed for storage path:", storagePath);
+    return null;
+  }
+
+  return {
+    fileName: String(data.file_name ?? "file"),
+    fileType,
+    buffer
+  };
+}
+
 export async function getDocumentAttachments(ids: Array<string | number>) {
   if (ids.length === 0) return [];
 
@@ -345,7 +619,12 @@ export async function getDocumentAttachments(ids: Array<string | number>) {
     return [];
   }
 
-  return Promise.all((data ?? []).map(toDocumentAttachment));
+  const sanitizedDocuments = (data ?? []).map((document) => ({
+    ...document,
+    metadata: sanitizeDocumentMetadataForClient(normalizeMetadata(document.metadata))
+  }));
+
+  return Promise.all(sanitizedDocuments.map(toDocumentAttachment));
 }
 
 export async function getDocumentsForMessages(
@@ -420,20 +699,122 @@ export async function getDocumentsForPrompt(ids: Array<string | number>) {
     return "";
   }
 
-  return (data ?? [])
+  return formatDocumentsForPrompt(data ?? []);
+}
+
+export async function searchDocumentsForPrompt(
+  query: string,
+  options: { excludeIds?: Array<string | number>; limit?: number } = {}
+) {
+  const terms = buildDocumentSearchTerms(query);
+  if (terms.length === 0) return "";
+
+  const supabase = getSupabase();
+  const excludeIds = new Set((options.excludeIds ?? []).map(String));
+  const limit = options.limit ?? 3;
+  const seen = new Set<string>();
+  const matched: Array<Record<string, unknown>> = [];
+
+  for (const term of terms) {
+    if (matched.length >= limit) break;
+
+    const pattern = `%${term}%`;
+    const { data, error } = await supabase
+      .from("documents")
+      .select("id, file_name, file_type, extracted_text, summary, metadata")
+      .or(`file_name.ilike.${pattern},summary.ilike.${pattern},extracted_text.ilike.${pattern}`)
+      .order("created_at", { ascending: false })
+      .limit(limit * 2);
+
+    if (error) {
+      console.error("Document search failed:", error.message);
+      continue;
+    }
+
+    for (const document of data ?? []) {
+      const id = String(document.id);
+      if (excludeIds.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      matched.push(document);
+      if (matched.length >= limit) break;
+    }
+  }
+
+  return formatDocumentsForPrompt(matched);
+}
+
+export async function buildDocumentsPromptForChat(
+  attachedDocumentIds: Array<string | number>,
+  userMessage: string
+) {
+  const searchedIds = await searchDocumentIdsByQuery(userMessage, 5);
+  const allDocumentIds = [
+    ...new Set([...attachedDocumentIds, ...searchedIds].map(String))
+  ].map((id) => id);
+
+  const [attachedPrompt, searchedPrompt, linkedMemory] = await Promise.all([
+    getDocumentsForPrompt(attachedDocumentIds),
+    searchDocumentsForPrompt(userMessage, { excludeIds: attachedDocumentIds, limit: 3 }),
+    getDocumentLinkedMemoryForPrompt(allDocumentIds, userMessage)
+  ]);
+
+  return [attachedPrompt, searchedPrompt, linkedMemory].filter(Boolean).join("\n\n---\n\n");
+}
+
+function formatDocumentsForPrompt(documents: Array<Record<string, unknown>>) {
+  return documents
     .map((document) => {
       const extractedText = String(document.extracted_text ?? "");
       const isImage = extractedText.startsWith("[Image file:");
+      const metadata = normalizeMetadata(document.metadata);
+      const spreadsheetHint =
+        metadata.kind === "spreadsheet"
+          ? `Spreadsheet metadata: sheets=${JSON.stringify(metadata.sheets ?? [])}; non_empty_cell_count=${Array.isArray(metadata.non_empty_cells) ? metadata.non_empty_cells.length : 0}; detected_tables=${Array.isArray(metadata.detected_tables) ? metadata.detected_tables.length : 0}`
+          : null;
+
       return [
         `Document: ${document.file_name} (${document.file_type})`,
         document.summary ? `Summary: ${document.summary}` : null,
-        isImage ? "Image attachment: available as vision input for the model." : "Extracted content:",
+        spreadsheetHint,
+        isImage ? "Image attachment: available as vision input for the model." : "Extracted content (use exact cell addresses and values; do not invent headers or columns):",
         isImage ? null : extractedText.slice(0, MAX_EXTRACTED_TEXT)
       ]
         .filter(Boolean)
         .join("\n");
     })
     .join("\n\n---\n\n");
+}
+
+function buildDocumentSearchTerms(query: string) {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) return [];
+
+  const terms = normalized
+    .split(/[^a-zа-яё0-9]+/i)
+    .filter((term) => term.length >= 2)
+    .slice(0, 5);
+
+  const numericTerms = normalized.match(/\d{2,}/g) ?? [];
+
+  const documentHints = [
+    "таблиц",
+    "excel",
+    "xlsx",
+    "xls",
+    "файл",
+    "лист",
+    "строк",
+    "колон",
+    "spreadsheet",
+    "sheet"
+  ];
+  const asksAboutFiles = documentHints.some((hint) => normalized.includes(hint));
+
+  if (asksAboutFiles) {
+    return [...new Set([...terms, ...numericTerms, "sheet", "лист"])].slice(0, 8);
+  }
+
+  return [...new Set([...terms, ...numericTerms])].slice(0, 6);
 }
 
 export async function getImageInputsForVision(ids: Array<string | number>) {
@@ -505,22 +886,26 @@ async function toDocumentAttachment(document: Record<string, unknown>): Promise<
   const metadata = normalizeMetadata(document.metadata);
   const storagePath = String(document.storage_path ?? "");
   const isImage = isImageDocument(fileType, metadata);
-  const inlineBase64 =
-    typeof metadata.inline_base64 === "string" ? metadata.inline_base64 : null;
-  const inlineDataUrl =
-    isImage && inlineBase64 ? `data:${fileType};base64,${inlineBase64}` : null;
-  const signedUrl =
-    isImage && storagePath && !inlineDataUrl ? await createSignedUrl(storagePath) : null;
+  const documentId = document.id as string | number | undefined;
+  const proxyUrl =
+    isImage && documentId != null ? buildDocumentInlineUrl(documentId) : null;
+
+  let fileUrl: string | null = null;
+  if (isImage) {
+    fileUrl = proxyUrl;
+  } else if (storagePath) {
+    fileUrl = await createSignedUrl(storagePath);
+  }
 
   return {
-    id: document.id as string | number,
+    id: documentId as string | number,
     fileName: String(document.file_name ?? "file"),
     fileType,
     fileSize: Number(document.file_size ?? 0),
     summary: document.summary ? String(document.summary) : null,
-    metadata,
-    previewUrl: inlineDataUrl ?? signedUrl,
-    fullUrl: inlineDataUrl ?? signedUrl
+    metadata: sanitizeDocumentMetadataForClient(metadata),
+    previewUrl: isImage ? fileUrl : null,
+    fullUrl: fileUrl
   };
 }
 
@@ -539,17 +924,32 @@ async function createSignedUrl(storagePath: string) {
   return data.signedUrl;
 }
 
-async function extractFileText(file: File, bytes: Buffer) {
-  const type = file.type || inferTypeFromName(file.name);
+type ExtractedFileContent = {
+  text: string;
+  metadata: Record<string, unknown>;
+  summary?: string | null;
+};
+
+async function extractFileText(file: File, bytes: Buffer): Promise<ExtractedFileContent> {
   const lowerName = file.name.toLowerCase();
+  const type = file.type || inferTypeFromName(file.name);
 
   if (
-    type.includes("spreadsheet") ||
-    type.includes("excel") ||
-    lowerName.endsWith(".xlsx") ||
-    lowerName.endsWith(".xls")
+    lowerName.endsWith(".csv") ||
+    type === "text/csv" ||
+    type === "application/csv"
   ) {
-    return extractSpreadsheet(bytes);
+    return extractCsv(bytes, lowerName, file.name);
+  }
+
+  if (
+    lowerName.endsWith(".xlsx") ||
+    lowerName.endsWith(".xls") ||
+    type === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" ||
+    (type === "application/vnd.ms-excel" && lowerName.endsWith(".xls")) ||
+    type.includes("spreadsheet")
+  ) {
+    return extractSpreadsheet(bytes, lowerName, file.name);
   }
 
   if (type === "application/pdf" || lowerName.endsWith(".pdf")) {
@@ -564,9 +964,11 @@ async function extractFileText(file: File, bytes: Buffer) {
   }
 
   if (isTextLike(type, lowerName)) {
+    const text = decodeTextBytes(bytes).slice(0, MAX_EXTRACTED_TEXT);
     return {
-      text: decodeTextBytes(bytes).slice(0, MAX_EXTRACTED_TEXT),
-      metadata: { kind: "text" }
+      text,
+      metadata: { kind: "text", file_type: lowerName.split(".").pop() ?? "txt" },
+      summary: summarizeExtractedText(text)
     };
   }
 
@@ -580,40 +982,6 @@ async function extractFileText(file: File, bytes: Buffer) {
   throw new Error(`Этот формат пока не поддержан: ${file.name}`);
 }
 
-function extractSpreadsheet(bytes: Buffer) {
-  const workbook = XLSX.read(bytes, { type: "buffer", cellDates: true });
-  const sheets = workbook.SheetNames.map((sheetName) => {
-    const worksheet = workbook.Sheets[sheetName];
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(worksheet, {
-      defval: "",
-      raw: false
-    });
-    const compactRows = rows.slice(0, MAX_ROWS_PER_SHEET);
-    const headers = rows[0] ? Object.keys(rows[0]) : [];
-
-    return {
-      sheetName,
-      headers,
-      rowCount: rows.length,
-      rows: compactRows
-    };
-  });
-
-  return {
-    text: JSON.stringify({ sheets }, null, 2).slice(0, MAX_EXTRACTED_TEXT),
-    metadata: {
-      kind: "spreadsheet",
-      sheet_count: sheets.length,
-      row_count: sheets.reduce((sum, sheet) => sum + sheet.rowCount, 0),
-      sheets: sheets.map((sheet) => ({
-        name: sheet.sheetName,
-        headers: sheet.headers,
-        row_count: sheet.rowCount
-      }))
-    }
-  };
-}
-
 async function extractPdf(bytes: Buffer) {
   await ensurePdfWorker();
   const { PDFParse } = await import("pdf-parse");
@@ -621,12 +989,15 @@ async function extractPdf(bytes: Buffer) {
 
   try {
     const parsed = await parser.getText();
+    const text = sanitizeStorageText(String(parsed.text ?? "")).slice(0, MAX_EXTRACTED_TEXT);
     return {
-      text: sanitizeStorageText(String(parsed.text ?? "")).slice(0, MAX_EXTRACTED_TEXT),
+      text,
       metadata: {
         kind: "pdf",
+        file_type: "pdf",
         page_count: parsed.pages?.length
-      }
+      },
+      summary: summarizeExtractedText(text)
     };
   } finally {
     await parser.destroy();
@@ -636,12 +1007,45 @@ async function extractPdf(bytes: Buffer) {
 async function extractDocx(bytes: Buffer) {
   const mammoth = await import("mammoth");
   const result = await mammoth.extractRawText({ buffer: bytes });
+  const text = String(result.value ?? "").slice(0, MAX_EXTRACTED_TEXT);
   return {
-    text: String(result.value ?? "").slice(0, MAX_EXTRACTED_TEXT),
+    text,
     metadata: {
       kind: "docx",
+      file_type: "docx",
       warnings: result.messages?.map((message) => message.message).slice(0, 10) ?? []
-    }
+    },
+    summary: summarizeExtractedText(text)
+  };
+}
+
+function extractCsv(bytes: Buffer, lowerName: string, fileName: string): ExtractedFileContent {
+  const decoded = decodeTextBytes(bytes);
+  try {
+    const workbook = XLSX.read(decoded, { type: "string", raw: false });
+    const parsed = parseSpreadsheetWorkbook(workbook, fileName, "csv");
+    return {
+      text: parsed.text,
+      metadata: parsed.metadata,
+      summary: parsed.summary
+    };
+  } catch {
+    return {
+      text: decoded.slice(0, MAX_EXTRACTED_TEXT),
+      metadata: { kind: "spreadsheet", file_type: "csv" },
+      summary: summarizeExtractedText(decoded)
+    };
+  }
+}
+
+function extractSpreadsheet(bytes: Buffer, lowerName: string, fileName: string): ExtractedFileContent {
+  const workbook = XLSX.read(bytes, { type: "buffer", cellDates: true });
+  const fileType = spreadsheetFileTypeFromName(lowerName);
+  const parsed = parseSpreadsheetWorkbook(workbook, fileName, fileType);
+  return {
+    text: parsed.text,
+    metadata: parsed.metadata,
+    summary: parsed.summary
   };
 }
 

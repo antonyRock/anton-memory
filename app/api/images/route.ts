@@ -4,15 +4,20 @@ import { touchConversation } from "@/lib/conversations";
 import {
   getImageFilesForEdit,
   linkDocumentsToMessage,
-  storeGeneratedImage
+  buildDocumentInlineUrl
 } from "@/lib/documents";
-import { getOpenAI, imageModel } from "@/lib/openai";
-import { saveMessage } from "@/lib/memory";
+import { createGeneratedImageDocument } from "@/lib/generated-image-storage";
+import { scheduleImageStorage } from "@/lib/image-post-processing";
+import { getOpenAI, getImageModelOptions, imageModel } from "@/lib/openai";
+import { patchMessageMetadata, saveMessage } from "@/lib/memory";
+import { createRequestProfiler } from "@/lib/request-profile";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 export async function POST(request: Request) {
+  const profiler = createRequestProfiler();
+
   try {
     const { prompt, documentIds, conversationId } = (await request.json()) as {
       prompt?: string;
@@ -26,39 +31,50 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Prompt is required." }, { status: 400 });
     }
 
-    const userMessageId = await saveMessage(
-      "user",
-      imagePrompt,
-      {
-        document_ids: sourceDocumentIds,
-        intent: "image"
-      },
-      conversationId
+    const userMessageId = await profiler.measure("databaseWriteMs", () =>
+      saveMessage(
+        "user",
+        imagePrompt,
+        {
+          document_ids: sourceDocumentIds,
+          intent: "image"
+        },
+        conversationId
+      )
     );
-    await touchConversation(conversationId);
-    await linkDocumentsToMessage({
-      messageId: userMessageId,
-      documentIds: sourceDocumentIds,
-      relationType: "image_input"
-    });
+    await profiler.measure("databaseWriteMs", () => touchConversation(conversationId));
 
     const inputImages = await getImageFilesForEdit(sourceDocumentIds);
-    const result =
+    await profiler.measure("databaseWriteMs", () =>
+      linkDocumentsToMessage({
+        messageId: userMessageId,
+        documentIds: sourceDocumentIds,
+        relationType: "image_input"
+      })
+    );
+
+    const modelOptions = getImageModelOptions();
+    const editImages =
       inputImages.length > 0
-        ? await getOpenAI().images.edit({
+        ? inputImages.length === 1
+          ? [await toUploadable(inputImages[0])]
+          : await Promise.all(inputImages.map(toUploadable))
+        : [];
+
+    const result = await profiler.measure("openAiRequestMs", () =>
+      editImages.length > 0
+        ? getOpenAI().images.edit({
             model: imageModel,
             prompt: imagePrompt,
-            image:
-              inputImages.length === 1
-                ? await toUploadable(inputImages[0])
-                : await Promise.all(inputImages.map(toUploadable)),
-            size: "1024x1024"
+            image: editImages.length === 1 ? editImages[0] : editImages,
+            ...modelOptions
           })
-        : await getOpenAI().images.generate({
+        : getOpenAI().images.generate({
             model: imageModel,
             prompt: imagePrompt,
-            size: "1024x1024"
-          });
+            ...modelOptions
+          })
+    );
 
     const imageBytes = await imageResponseToBuffer(result.data?.[0]);
     if (!imageBytes) {
@@ -66,51 +82,81 @@ export async function POST(request: Request) {
     }
 
     const imageUrl = `data:image/png;base64,${imageBytes.toString("base64")}`;
-    let document: Awaited<ReturnType<typeof storeGeneratedImage>> | null = null;
+    const answer = "Готово.";
 
+    let assistantMessageId: string | number | undefined;
     try {
-      document = await storeGeneratedImage({
-        prompt: imagePrompt,
-        imageBytes,
-        sourceDocumentIds
-      });
-    } catch (storageError) {
-      console.error("Generated image storage failed:", storageError);
+      assistantMessageId = await profiler.measure("databaseWriteMs", () =>
+        saveMessage(
+          "assistant",
+          answer,
+          {
+            reply_to_message_id: userMessageId,
+            source_document_ids: sourceDocumentIds,
+            intent: editImages.length > 0 ? "image_edit" : "image_generation",
+            image_pending: true
+          },
+          conversationId
+        )
+      );
+    } catch (saveError) {
+      console.error("Generated image assistant message save failed:", saveError);
     }
 
-    const answer = document
-      ? "Готово."
-      : "Готово. Картинка создана, но сохранение в облако не удалось.";
+    let documentId: string | number | null = null;
 
-    const assistantMessageId = await saveMessage(
-      "assistant",
-      answer,
-      {
-        reply_to_message_id: userMessageId,
-        ...(document ? { generated_document_id: document.id } : {}),
-        source_document_ids: sourceDocumentIds,
-        intent: inputImages.length > 0 ? "image_edit" : "image_generation"
-      },
-      conversationId
-    );
-    await touchConversation(conversationId);
+    if (assistantMessageId) {
+      try {
+        const { document } = await profiler.measure("databaseWriteMs", () =>
+          createGeneratedImageDocument({
+            prompt: imagePrompt,
+            imageBytes,
+            sourceDocumentIds
+          })
+        );
+        documentId = document.id;
 
-    if (document) {
-      await linkDocumentsToMessage({
-        messageId: assistantMessageId,
-        documentIds: [document.id],
-        relationType: "generated_output"
-      });
+        await profiler.measure("databaseWriteMs", () =>
+          patchMessageMetadata(assistantMessageId!, {
+            generated_document_id: document.id,
+            image_preview_url: buildDocumentInlineUrl(document.id),
+            image_pending: true
+          })
+        );
+
+        await profiler.measure("databaseWriteMs", () =>
+          linkDocumentsToMessage({
+            messageId: assistantMessageId,
+            documentIds: [document.id],
+            relationType: "generated_output"
+          })
+        );
+
+        scheduleImageStorage({
+          conversationId,
+          assistantMessageId,
+          documentId: document.id,
+          imageBytes
+        });
+      } catch (documentError) {
+        console.error("Generated image document save failed:", documentError);
+      }
+    } else {
+      console.error("Generated image was created but assistant message was not saved.");
     }
+
+    profiler.finish({ conversationId, route: "images" });
 
     return NextResponse.json({
       answer,
       imageUrl,
-      documentId: document?.id ?? null,
-      storagePath: document?.storage_path ?? null,
-      storageSaved: Boolean(document)
+      documentId,
+      storagePath: null,
+      storageSaved: false,
+      storagePending: Boolean(documentId)
     });
   } catch (error) {
+    profiler.finish({ route: "images" });
     const message =
       error instanceof Error ? error.message : "Unexpected image generation error.";
     return NextResponse.json({ error: message }, { status: 500 });

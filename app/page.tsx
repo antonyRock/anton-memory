@@ -3,7 +3,6 @@
 import {
   FormEvent,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -12,10 +11,22 @@ import {
   type PointerEvent,
   type ReactNode
 } from "react";
+import { SearchResultsList } from "@/components/SearchResultsList";
 import { SidebarMoreMenu } from "@/components/SidebarMoreMenu";
+import { ComposerTextarea } from "@/components/ComposerTextarea";
+import { SidebarUserProfile } from "@/components/SidebarUserProfile";
 import { ProjectFolderList } from "@/components/ProjectFolderList";
+import { ChatFilesPanel } from "@/components/ChatFilesPanel";
 import { ChatContextMenu } from "@/components/ChatContextMenu";
+import { ProjectNavigator } from "@/components/ProjectNavigator";
 import { ObsidianBackground } from "@/components/ObsidianBackground";
+import {
+  buildChatUrl,
+  syncChatQueryParam
+} from "@/lib/chat-links";
+import { isConversationPinned, sortConversationsForSidebar } from "@/lib/chat-pins";
+import type { FileNavItem } from "@/lib/file-navigation";
+import { isMobileViewport } from "@/lib/viewport";
 import {
   ThinkingIndicator,
   type ThinkingPhase
@@ -24,15 +35,19 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
+  ChevronsDown,
+  ChevronsUp,
   FileSpreadsheet,
   FileText,
   GripVertical,
   Image as ImageIcon,
+  Link2,
   Loader2,
   Mic,
   PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
+  Pin,
   Search,
   Send,
   Square,
@@ -58,6 +73,7 @@ type ChatMessage = {
   role: "user" | "assistant";
   content: string;
   imageUrl?: string;
+  metadata?: Record<string, unknown>;
   attachments?: FileAttachment[];
 };
 
@@ -66,6 +82,7 @@ type Conversation = {
   title: string | null;
   summary: string | null;
   project_id?: string | number | null;
+  metadata?: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
 };
@@ -83,8 +100,13 @@ type SearchResult = {
   typeLabel: string;
   id: string | number;
   conversationId?: string | number | null;
+  documentId?: string | number | null;
   title: string;
   snippet: string;
+  fileName?: string;
+  conversationTitle?: string;
+  projectTitle?: string;
+  matchText?: string;
 };
 
 type LibraryView = "files" | "images" | "settings" | null;
@@ -93,6 +115,7 @@ const DEFAULT_CHAT_TITLE = "Новый чат";
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 420;
 const DEFAULT_SIDEBAR_WIDTH = 280;
+const SCROLL_BOTTOM_THRESHOLD = 96;
 
 export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -111,6 +134,8 @@ export default function Home() {
   } | null>(null);
   const [projectsCollapsed, setProjectsCollapsed] = useState(false);
   const [libraryView, setLibraryView] = useState<LibraryView>(null);
+  const [activeProjectId, setActiveProjectId] = useState<string | number | null>(null);
+  const [showChatFilesPanel, setShowChatFilesPanel] = useState(false);
   const [isDragOver, setIsDragOver] = useState(false);
   const dragDepthRef = useRef(0);
   const [activeConversationId, setActiveConversationId] = useState<string | number | null>(null);
@@ -124,6 +149,7 @@ export default function Home() {
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [activityPhase, setActivityPhase] = useState<ThinkingPhase | null>(null);
   const [streamingAssistantText, setStreamingAssistantText] = useState<string | null>(null);
@@ -131,17 +157,23 @@ export default function Home() {
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [previewImage, setPreviewImage] = useState<FileAttachment | null>(null);
   const [note, setNote] = useState("Готово");
+  const [isRenamingChat, setIsRenamingChat] = useState(false);
+  const [renameChatValue, setRenameChatValue] = useState("");
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const activeRequestRef = useRef<AbortController | null>(null);
+  const streamReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const chunksRef = useRef<BlobPart[]>([]);
   const recordingActionRef = useRef<"send" | "cancel">("send");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const chatRenameInputRef = useRef<HTMLInputElement | null>(null);
   const messagesRef = useRef<HTMLElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
-  const pendingResetScrollRef = useRef(false);
+  const stickToBottomConversationRef = useRef<string | null>(null);
+  const stickToBottomTimerRef = useRef<number | null>(null);
   const resizingSidebarRef = useRef(false);
   const hasMessages = messages.length > 0;
+  const pinComposerToBottom = hasMessages || activeConversationId != null;
   const isUploadingFiles = attachments.some((file) => file.status === "uploading");
   const showChatIndicator =
     isLoading &&
@@ -149,24 +181,65 @@ export default function Home() {
   const showCompactIndicator = isUploadingFiles || isTranscribing;
   const matchCount = countMatchesInMessages(messages, highlightTerm);
   const bootstrappedRef = useRef(false);
-  const generalConversations = conversations.filter((conversation) => !conversation.project_id);
-
-  useLayoutEffect(() => {
-    window.localStorage.removeItem("activeConversationId");
-    setActiveConversationId(null);
-    setMessages([]);
-    pendingResetScrollRef.current = true;
-  }, []);
+  const prefsHydratedRef = useRef(false);
+  const loadMessagesSeqRef = useRef(0);
+  const messagesCacheRef = useRef<Map<string, ChatMessage[]>>(new Map());
+  const messagesAbortRef = useRef<AbortController | null>(null);
+  const creatingChatRef = useRef(false);
+  const pendingNewChatProjectIdRef = useRef<string | number | null>(null);
+  const generalConversations = sortConversationsForSidebar(
+    conversations.filter((conversation) => !conversation.project_id)
+  );
+  const activeConversation = conversations.find(
+    (conversation) => String(conversation.id) === String(activeConversationId)
+  );
+  const activeProject = projects.find(
+    (project) => activeProjectId != null && String(project.id) === String(activeProjectId)
+  );
+  const projectConversations =
+    activeProjectId != null
+      ? sortConversationsForSidebar(
+          conversations.filter(
+            (conversation) => String(conversation.project_id) === String(activeProjectId)
+          )
+        )
+      : [];
+  const isActiveConversationPinned = activeConversation
+    ? isConversationPinned(activeConversation)
+    : false;
+  const allProjectsExpanded =
+    projects.length > 0 &&
+    projects.every((project) => expandedProjectIds[String(project.id)] === true);
+  const showProjectView = activeProjectId != null && !activeConversationId;
+  const activeChatTitle = activeConversation
+    ? (() => {
+        const list = activeConversation.project_id
+          ? conversations.filter(
+              (item) => String(item.project_id) === String(activeConversation.project_id)
+            )
+          : generalConversations;
+        const index = list.findIndex((item) => String(item.id) === String(activeConversation.id));
+        return conversationTitle(activeConversation, list, Math.max(index, 0));
+      })()
+    : DEFAULT_CHAT_TITLE;
 
   useEffect(() => {
-    navigator.serviceWorker?.getRegistrations().then((registrations) => {
-      registrations.forEach((registration) => {
-        void registration.update();
+    if (process.env.NODE_ENV === "production") {
+      navigator.serviceWorker?.register("/sw.js").catch(() => undefined);
+    } else {
+      navigator.serviceWorker?.getRegistrations().then((registrations) => {
+        registrations.forEach((registration) => {
+          void registration.unregister();
+        });
       });
-    });
-    navigator.serviceWorker?.register("/sw.js").catch(() => undefined);
-    setSidebarCollapsed(window.localStorage.getItem("sidebarCollapsed") === "true");
+    }
+
+    const isMobile = isMobileViewport();
+    setSidebarCollapsed(
+      isMobile ? false : window.localStorage.getItem("sidebarCollapsed") === "true"
+    );
     setRecentCollapsed(window.localStorage.getItem("recentCollapsed") === "true");
+
     const savedExpanded = window.localStorage.getItem("expandedProjectIds");
     if (savedExpanded) {
       try {
@@ -175,8 +248,13 @@ export default function Home() {
         setExpandedProjectIds({});
       }
     }
+
     const savedWidth = Number(window.localStorage.getItem("sidebarWidth"));
-    if (Number.isFinite(savedWidth)) setSidebarWidth(clampSidebarWidth(savedWidth));
+    if (Number.isFinite(savedWidth)) {
+      setSidebarWidth(clampSidebarWidth(savedWidth));
+    }
+
+    prefsHydratedRef.current = true;
     void bootstrap();
   }, []);
 
@@ -195,39 +273,141 @@ export default function Home() {
   }, [search, activeConversationId]);
 
   useEffect(() => {
+    setIsRenamingChat(false);
+    setRenameChatValue("");
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    if (activeConversationId == null) return;
+    messagesCacheRef.current.set(String(activeConversationId), messages);
+  }, [messages, activeConversationId]);
+
+  useEffect(() => {
+    if (!isRenamingChat) return;
+    chatRenameInputRef.current?.focus();
+    chatRenameInputRef.current?.select();
+  }, [isRenamingChat]);
+
+  useEffect(() => {
     if (!shouldAutoScrollRef.current) return;
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading, streamingAssistantText]);
 
-  useLayoutEffect(() => {
-    if (!pendingResetScrollRef.current) return;
-    resetMessagesScroll();
-    pendingResetScrollRef.current = false;
+  useEffect(() => {
+    const node = messagesRef.current;
+    if (!node || !hasMessages || showProjectView) {
+      setShowScrollToBottom(false);
+      return;
+    }
+
+    const updateScrollToBottomVisibility = () => {
+      const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+      const atBottom = distanceFromBottom <= SCROLL_BOTTOM_THRESHOLD;
+      const canScroll = node.scrollHeight > node.clientHeight + 8;
+      setShowScrollToBottom(canScroll && !atBottom);
+      return atBottom;
+    };
+
+    const onScroll = () => {
+      const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+      const atBottom = distanceFromBottom <= SCROLL_BOTTOM_THRESHOLD;
+      if (!atBottom) {
+        shouldAutoScrollRef.current = false;
+        if (stickToBottomConversationRef.current === String(activeConversationId)) {
+          stickToBottomConversationRef.current = null;
+        }
+      } else if (isLoading || streamingAssistantText !== null) {
+        shouldAutoScrollRef.current = true;
+      }
+      updateScrollToBottomVisibility();
+    };
+
+    node.addEventListener("scroll", onScroll, { passive: true });
+    const resizeObserver = new ResizeObserver(updateScrollToBottomVisibility);
+    resizeObserver.observe(node);
+
+    updateScrollToBottomVisibility();
+
+    return () => {
+      node.removeEventListener("scroll", onScroll);
+      resizeObserver.disconnect();
+    };
+  }, [
+    hasMessages,
+    showProjectView,
+    isLoading,
+    streamingAssistantText,
+    messages.length,
+    activeConversationId
+  ]);
+
+  useEffect(() => {
+    if (!activeConversationId) return;
+    if (stickToBottomConversationRef.current !== String(activeConversationId)) return;
+    scrollMessagesToBottom(true);
   }, [messages, activeConversationId]);
 
-  useLayoutEffect(() => {
-    resizeComposerTextarea();
-  }, [input]);
-
-  useLayoutEffect(() => {
+  useEffect(() => {
     if (!highlightTerm || matchCount === 0) return;
     const active = messagesRef.current?.querySelector(".search-highlight.active");
     active?.scrollIntoView({ block: "center", behavior: "smooth" });
   }, [activeMatchIndex, highlightTerm, matchCount, messages]);
 
   useEffect(() => {
+    if (!prefsHydratedRef.current) return;
     window.localStorage.setItem("sidebarCollapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
   useEffect(() => {
-    window.localStorage.setItem("expandedProjectIds", JSON.stringify(expandedProjectIds));
-  }, [expandedProjectIds]);
+    if (!sidebarOpen) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSidebarOpen(false);
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [sidebarOpen]);
 
   useEffect(() => {
+    if (!sidebarOpen || !isMobileViewport()) return;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [sidebarOpen]);
+
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 800px)");
+    const onChange = () => {
+      if (!media.matches) {
+        setSidebarOpen(false);
+      }
+    };
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    if (!prefsHydratedRef.current) return;
+    window.localStorage.setItem("expandedProjectIds", JSON.stringify(expandedProjectIds));
+    if (projects.length > 0) {
+      const everyExpanded = projects.every(
+        (project) => expandedProjectIds[String(project.id)] === true
+      );
+      window.localStorage.setItem("projectsExpanded", String(everyExpanded));
+    }
+  }, [expandedProjectIds, projects]);
+
+  useEffect(() => {
+    if (!prefsHydratedRef.current) return;
     window.localStorage.setItem("recentCollapsed", String(recentCollapsed));
   }, [recentCollapsed]);
 
   useEffect(() => {
+    if (!prefsHydratedRef.current) return;
     window.localStorage.setItem("sidebarWidth", String(sidebarWidth));
   }, [sidebarWidth]);
 
@@ -238,9 +418,14 @@ export default function Home() {
   }, [activeMatchIndex, matchCount]);
 
   async function bootstrap() {
-    resetToNewChat();
     bootstrappedRef.current = true;
+    const chatFromUrl = new URLSearchParams(window.location.search).get("chat");
     await Promise.all([loadRecentConversations(), loadProjects()]);
+    if (chatFromUrl) {
+      openConversation(chatFromUrl);
+      return;
+    }
+    resetToNewChat();
   }
 
   async function loadProjects() {
@@ -248,7 +433,18 @@ export default function Home() {
       const response = await fetch("/api/projects");
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить проекты");
-      setProjects(data.projects ?? []);
+      const loaded = (data.projects ?? []) as Project[];
+      setProjects(loaded);
+
+      if (loaded.length > 0 && window.localStorage.getItem("projectsExpanded") === "true") {
+        setExpandedProjectIds((current) => {
+          const next = { ...current };
+          for (const project of loaded) {
+            next[String(project.id)] = true;
+          }
+          return next;
+        });
+      }
     } catch {
       setProjects([]);
     }
@@ -326,6 +522,24 @@ export default function Home() {
     setExpandedProjectIds((current) => ({ ...current, [key]: !current[key] }));
   }
 
+  function toggleAllProjectsExpanded() {
+    if (projects.length === 0) return;
+
+    if (allProjectsExpanded) {
+      setExpandedProjectIds({});
+      window.localStorage.setItem("projectsExpanded", "false");
+      return;
+    }
+
+    const next: Record<string, boolean> = {};
+    for (const project of projects) {
+      next[String(project.id)] = true;
+    }
+    setExpandedProjectIds(next);
+    window.localStorage.setItem("projectsExpanded", "true");
+    setProjectsCollapsed(false);
+  }
+
   async function renameProject(projectId: string | number, title: string) {
     const project = projects.find((item) => String(item.id) === String(projectId));
     const trimmed = title.trim();
@@ -385,6 +599,80 @@ export default function Home() {
     }
   }
 
+  function beginChatRename() {
+    if (!activeConversationId || !activeConversation) return;
+    setRenameChatValue(normalizeConversationTitle(activeConversation.title));
+    setIsRenamingChat(true);
+  }
+
+  function cancelChatRename() {
+    setIsRenamingChat(false);
+    setRenameChatValue("");
+  }
+
+  async function submitChatRename() {
+    if (!activeConversationId) {
+      cancelChatRename();
+      return;
+    }
+
+    const trimmed = renameChatValue.trim().slice(0, 80);
+    const currentTitle = normalizeConversationTitle(activeConversation?.title ?? null);
+    setIsRenamingChat(false);
+    setRenameChatValue("");
+
+    if (!trimmed || trimmed === currentTitle) return;
+
+    try {
+      const response = await fetch(`/api/conversations/${activeConversationId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title: trimmed })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось переименовать чат");
+
+      const updated = data.conversation as Conversation;
+      setConversations((current) =>
+        current.map((conversation) =>
+          String(conversation.id) === String(activeConversationId)
+            ? { ...conversation, ...updated }
+            : conversation
+        )
+      );
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось переименовать чат");
+    }
+  }
+
+  async function toggleConversationPin() {
+    if (!activeConversationId || !activeConversation) return;
+
+    const nextPinned = !isConversationPinned(activeConversation);
+
+    try {
+      const response = await fetch(`/api/conversations/${activeConversationId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pinned: nextPinned })
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось закрепить чат");
+
+      const updated = data.conversation as Conversation;
+      setConversations((current) =>
+        current.map((conversation) =>
+          String(conversation.id) === String(activeConversationId)
+            ? { ...conversation, ...updated }
+            : conversation
+        )
+      );
+      setNote(nextPinned ? "Чат закреплён" : "Чат откреплён");
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось закрепить чат");
+    }
+  }
+
   async function moveConversationToProject(
     conversationId: string | number,
     projectId: string | number | null
@@ -425,10 +713,34 @@ export default function Home() {
     setDropTargetProjectId(null);
   }
 
+  function toggleSidebar() {
+    if (!isMobileViewport()) return;
+
+    if (sidebarOpen) {
+      setSidebarOpen(false);
+    } else {
+      setSidebarCollapsed(false);
+      setSidebarOpen(true);
+    }
+  }
+
+  function openSidebar() {
+    setSidebarCollapsed(false);
+    if (isMobileViewport()) {
+      setSidebarOpen(true);
+    }
+  }
+
+  function closeSidebarIfMobile() {
+    if (isMobileViewport()) {
+      setSidebarOpen(false);
+    }
+  }
+
   function expandProjectFromSearch(projectId: string | number) {
     setExpandedProjectIds((current) => ({ ...current, [String(projectId)]: true }));
     setProjectsCollapsed(false);
-    setSidebarOpen(true);
+    openSidebar();
   }
 
   async function loadRecentConversations() {
@@ -468,14 +780,26 @@ export default function Home() {
     }
   }
 
+  function cancelPendingMessageLoad() {
+    messagesAbortRef.current?.abort();
+    messagesAbortRef.current = null;
+    loadMessagesSeqRef.current += 1;
+  }
+
   async function loadMessages(conversationId: string | number) {
+    cancelPendingMessageLoad();
+    const requestSeq = loadMessagesSeqRef.current;
+    const controller = new AbortController();
+    messagesAbortRef.current = controller;
+
     try {
-      shouldAutoScrollRef.current = false;
-      pendingResetScrollRef.current = true;
-      resetMessagesScroll();
-      const response = await fetch(`/api/conversations/${conversationId}/messages`);
+      const response = await fetch(`/api/conversations/${conversationId}/messages`, {
+        signal: controller.signal
+      });
       const data = await response.json();
+      if (requestSeq !== loadMessagesSeqRef.current) return;
       if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить сообщения");
+
       setMessages(
         (data.messages ?? []).map(
           (message: {
@@ -483,24 +807,37 @@ export default function Home() {
             content: string;
             attachments?: FileAttachment[];
             imageUrl?: string | null;
+            metadata?: Record<string, unknown>;
           }) => ({
             role: message.role,
             content: message.content,
             attachments: message.attachments ?? [],
-            imageUrl: message.imageUrl ?? undefined
+            imageUrl: message.imageUrl ?? undefined,
+            metadata: message.metadata ?? undefined
           })
         )
       );
+      shouldAutoScrollRef.current = true;
+      beginStickToBottom(conversationId);
       window.localStorage.setItem("activeConversationId", String(conversationId));
       setSidebarOpen(false);
     } catch (error) {
+      if (requestSeq !== loadMessagesSeqRef.current) return;
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setMessages([]);
       setNote(error instanceof Error ? error.message : "Не удалось загрузить сообщения");
+    } finally {
+      if (requestSeq === loadMessagesSeqRef.current) {
+        messagesAbortRef.current = null;
+      }
     }
   }
 
   function resetToNewChat() {
+    cancelPendingMessageLoad();
+    pendingNewChatProjectIdRef.current = null;
+    creatingChatRef.current = false;
     shouldAutoScrollRef.current = false;
-    pendingResetScrollRef.current = true;
     resetMessagesScroll();
     setActiveConversationId(null);
     setMessages([]);
@@ -512,14 +849,27 @@ export default function Home() {
     setLibraryView(null);
     setNote(DEFAULT_CHAT_TITLE);
     window.localStorage.removeItem("activeConversationId");
+    syncChatQueryParam(null);
   }
 
-  async function createConversation() {
+  async function copyChatLink(conversationId: string | number) {
+    const url = buildChatUrl(conversationId);
     try {
+      await navigator.clipboard.writeText(url);
+      setNote("Ссылка на чат скопирована");
+    } catch {
+      setNote(url);
+    }
+  }
+
+  async function createConversation(projectId?: string | number | null) {
+    try {
+      const body =
+        projectId != null && projectId !== "" ? { projectId } : {};
       const response = await fetch("/api/conversations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({})
+        body: JSON.stringify(body)
       });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось создать чат");
@@ -531,8 +881,6 @@ export default function Home() {
         conversation,
         ...current.filter((item) => String(item.id) !== String(conversation.id))
       ]);
-      setActiveConversationId(conversation.id);
-      window.localStorage.setItem("activeConversationId", String(conversation.id));
       return conversation.id;
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Не удалось создать чат");
@@ -540,15 +888,177 @@ export default function Home() {
     }
   }
 
+  async function startNewChat() {
+    const projectId = activeProjectId ?? activeConversation?.project_id ?? null;
+    if (projectId != null) {
+      if (creatingChatRef.current) return;
+
+      creatingChatRef.current = true;
+      pendingNewChatProjectIdRef.current = projectId;
+      const previousProjectId = activeProjectId;
+      cancelPendingMessageLoad();
+
+      shouldAutoScrollRef.current = false;
+      resetMessagesScroll();
+      setActiveProjectId(null);
+      setActiveConversationId(null);
+      setShowChatFilesPanel(false);
+      setMessages([]);
+      setInput("");
+      setAttachments([]);
+      setPreviewImage(null);
+      setLibraryView(null);
+      setSearch("");
+      setSearchResults([]);
+      setHighlightTerm("");
+      setActiveMatchIndex(0);
+      setNote("Создаю чат...");
+      closeSidebarIfMobile();
+
+      try {
+        const conversationId = await createConversation(projectId);
+        if (!conversationId) {
+          if (previousProjectId != null) setActiveProjectId(previousProjectId);
+          return;
+        }
+
+        setExpandedProjectIds((current) => ({ ...current, [String(projectId)]: true }));
+        setProjectsCollapsed(false);
+        setActiveConversationId(conversationId);
+        window.localStorage.setItem("activeConversationId", String(conversationId));
+        syncChatQueryParam(conversationId);
+        setNote(DEFAULT_CHAT_TITLE);
+      } finally {
+        pendingNewChatProjectIdRef.current = null;
+        creatingChatRef.current = false;
+      }
+      return;
+    }
+
+    resetToNewChat();
+    closeSidebarIfMobile();
+  }
+
+  function openProject(projectId: string | number) {
+    cancelPendingMessageLoad();
+    pendingNewChatProjectIdRef.current = null;
+    creatingChatRef.current = false;
+    shouldAutoScrollRef.current = false;
+    resetMessagesScroll();
+    setActiveProjectId(projectId);
+    setActiveConversationId(null);
+    setMessages([]);
+    setLibraryView(null);
+    setShowChatFilesPanel(false);
+    setInput("");
+    setAttachments([]);
+    closeSidebarIfMobile();
+    window.history.replaceState({}, "", "/");
+  }
+
+  function closeProjectView() {
+    setActiveProjectId(null);
+  }
+
+  function openChatFilesPanel() {
+    if (!activeConversationId) return;
+    setShowChatFilesPanel(true);
+    closeSidebarIfMobile();
+  }
+
+  function handleOpenNavFile(file: FileNavItem) {
+    void openFileAttachment(file);
+  }
+
+  async function openFileAttachment(attachment: {
+    id?: string | number;
+    fileName: string;
+    fileType: string;
+    fileSize?: number;
+    fullUrl?: string | null;
+    previewUrl?: string | null;
+    metadata?: Record<string, unknown>;
+    conversationId?: string | number | null;
+  }) {
+    if (isImage(attachment as FileAttachment)) {
+      const imageUrl =
+        attachment.fullUrl ??
+        attachment.previewUrl ??
+        (attachment.id != null ? buildDocumentDownloadUrl(attachment.id, true) : null);
+      if (imageUrl) {
+        setPreviewImage({
+          id: attachment.id,
+          fileName: attachment.fileName,
+          fileType: attachment.fileType,
+          fileSize: attachment.fileSize ?? 0,
+          fullUrl: imageUrl,
+          previewUrl: imageUrl,
+          metadata: attachment.metadata
+        });
+        return;
+      }
+    }
+
+    if (attachment.id == null) {
+      if (attachment.conversationId != null) {
+        setActiveProjectId(null);
+        setShowChatFilesPanel(false);
+        openConversation(attachment.conversationId);
+        setNote("Файл недоступен для скачивания, открыт исходный чат");
+        return;
+      }
+      setNote("Не удалось открыть файл");
+      return;
+    }
+
+    const inline = canOpenDocumentInline(attachment.fileName, attachment.fileType);
+    const url = buildDocumentDownloadUrl(attachment.id, inline);
+
+    if (isMobileViewport()) {
+      setNote(inline ? "Открываю файл..." : `Скачиваю ${attachment.fileName}...`);
+      try {
+        await downloadDocumentViaBlob(url, attachment.fileName, inline);
+        setNote(inline ? "Файл открыт" : "Файл скачан");
+      } catch {
+        setNote("Не удалось открыть файл");
+      }
+      return;
+    }
+
+    triggerDocumentDownloadLink(url, attachment.fileName, inline);
+  }
+
   function openConversation(conversationId: string | number | null | undefined) {
     if (!conversationId || String(conversationId) === "legacy") return;
-    shouldAutoScrollRef.current = false;
-    pendingResetScrollRef.current = true;
-    resetMessagesScroll();
-    setActiveConversationId(conversationId);
+
+    const conversation = conversations.find(
+      (item) => String(item.id) === String(conversationId)
+    );
+
+    pendingNewChatProjectIdRef.current = null;
+    creatingChatRef.current = false;
+    shouldAutoScrollRef.current = true;
+    beginStickToBottom(conversationId);
+    setShowChatFilesPanel(false);
     setLibraryView(null);
+    setPreviewImage(null);
+    setMessages(messagesCacheRef.current.get(String(conversationId)) ?? []);
+
+    if (conversation?.project_id != null) {
+      setActiveProjectId(conversation.project_id);
+      setExpandedProjectIds((current) => ({
+        ...current,
+        [String(conversation.project_id)]: true
+      }));
+    } else {
+      setActiveProjectId(null);
+    }
+
+    setActiveConversationId(conversationId);
     window.localStorage.setItem("activeConversationId", String(conversationId));
+    syncChatQueryParam(conversationId);
     void loadMessages(conversationId);
+    closeSidebarIfMobile();
   }
 
   function clearSearch() {
@@ -587,19 +1097,78 @@ export default function Home() {
     }
   }
 
+  function beginStickToBottom(conversationId: string | number) {
+    stickToBottomConversationRef.current = String(conversationId);
+    if (stickToBottomTimerRef.current) {
+      window.clearTimeout(stickToBottomTimerRef.current);
+    }
+    stickToBottomTimerRef.current = window.setTimeout(() => {
+      if (stickToBottomConversationRef.current === String(conversationId)) {
+        stickToBottomConversationRef.current = null;
+      }
+      stickToBottomTimerRef.current = null;
+    }, 3500);
+  }
+
+  function shouldStickToBottom() {
+    return (
+      activeConversationId != null &&
+      stickToBottomConversationRef.current === String(activeConversationId)
+    );
+  }
+
+  function handleConversationMediaLoad() {
+    if (shouldStickToBottom() || shouldAutoScrollRef.current) {
+      scrollMessagesToBottom(false);
+    }
+  }
+
   function resetMessagesScroll() {
     if (messagesRef.current) messagesRef.current.scrollTop = 0;
     window.scrollTo(0, 0);
     document.documentElement.scrollTop = 0;
     document.body.scrollTop = 0;
+    setShowScrollToBottom(false);
   }
 
-  function resizeComposerTextarea() {
-    const textarea = textareaRef.current;
-    if (!textarea) return;
-    textarea.style.height = "auto";
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
-    textarea.style.overflowY = textarea.scrollHeight > 160 ? "auto" : "hidden";
+  function scrollMessagesToBottom(followLayout = false) {
+    const node = messagesRef.current;
+    if (!node) return;
+
+    const apply = () => {
+      node.scrollTop = node.scrollHeight;
+      setShowScrollToBottom(false);
+    };
+
+    apply();
+    requestAnimationFrame(apply);
+    window.setTimeout(apply, 0);
+    window.setTimeout(apply, 60);
+    window.setTimeout(apply, 180);
+
+    if (!followLayout) return;
+
+    const started = performance.now();
+    const observer = new ResizeObserver(() => {
+      if (!shouldStickToBottom() && !shouldAutoScrollRef.current) return;
+      apply();
+      if (performance.now() - started > 3500) {
+        observer.disconnect();
+      }
+    });
+    observer.observe(node);
+    window.setTimeout(() => observer.disconnect(), 3500);
+  }
+
+  function scrollToChatBottom() {
+    shouldAutoScrollRef.current = true;
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+    const node = messagesRef.current;
+    if (!node) return;
+    window.setTimeout(() => {
+      const distanceFromBottom = node.scrollHeight - node.scrollTop - node.clientHeight;
+      setShowScrollToBottom(distanceFromBottom > SCROLL_BOTTOM_THRESHOLD);
+    }, 350);
   }
 
   function openSearchResult(result: SearchResult) {
@@ -612,12 +1181,39 @@ export default function Home() {
       expandProjectFromSearch(result.id);
       return;
     }
+    if (result.type === "document" || result.type === "image") {
+      void openSearchDocument(result);
+      return;
+    }
     if (result.conversationId) {
       openConversation(result.conversationId);
       return;
     }
     if (result.type === "conversation") {
       openConversation(result.id);
+    }
+  }
+
+  async function openSearchDocument(result: SearchResult) {
+    const documentId = result.documentId ?? result.id;
+    try {
+      const response = await fetch(`/api/documents/${documentId}`);
+      const data = await response.json();
+      if (response.ok && data.file) {
+        await openFileAttachment({
+          ...data.file,
+          conversationId: result.conversationId ?? null
+        });
+        closeSidebarIfMobile();
+        return;
+      }
+    } catch {
+      // Fall back to opening the source chat below.
+    }
+
+    if (result.conversationId) {
+      openConversation(result.conversationId);
+      closeSidebarIfMobile();
     }
   }
 
@@ -657,6 +1253,24 @@ export default function Home() {
     window.addEventListener("pointerup", onUp);
   }
 
+  function stopGeneration() {
+    activeRequestRef.current?.abort();
+    activeRequestRef.current = null;
+    void streamReaderRef.current?.cancel().catch(() => undefined);
+    streamReaderRef.current = null;
+    setStreamingAssistantText(null);
+    setIsLoading(false);
+    setActivityPhase(null);
+    setMessages((current) => {
+      const last = current[current.length - 1];
+      if (last?.role === "assistant" && !last.content && !last.imageUrl) {
+        return current.slice(0, -1);
+      }
+      return current;
+    });
+    setNote("Остановлено");
+  }
+
   async function sendMessage(text: string, files = attachments) {
     const trimmed = text.trim();
     if ((!trimmed && files.length === 0) || isLoading) return;
@@ -667,8 +1281,22 @@ export default function Home() {
 
     setLibraryView(null);
 
+    if (creatingChatRef.current || pendingNewChatProjectIdRef.current != null) {
+      setNote("Создаю чат...");
+      return;
+    }
+
     let conversationId = activeConversationId;
-    if (!conversationId) conversationId = await createConversation();
+    if (!conversationId) {
+      const projectId =
+        activeProjectId ?? activeConversation?.project_id ?? pendingNewChatProjectIdRef.current;
+      conversationId = await createConversation(projectId ?? undefined);
+      if (conversationId) {
+        setActiveConversationId(conversationId);
+        window.localStorage.setItem("activeConversationId", String(conversationId));
+        syncChatQueryParam(conversationId);
+      }
+    }
     if (!conversationId) {
       setNote("Не удалось создать чат. Проверьте подключение к Supabase.");
       return;
@@ -693,21 +1321,23 @@ export default function Home() {
     setMessages((current) => [
       ...current,
       { role: "user", content: displayText, attachments: readyFiles },
-      ...(imageIntent ? [] : [{ role: "assistant" as const, content: "" }])
+      { role: "assistant", content: "" }
     ]);
-    if (!imageIntent) {
-      setStreamingAssistantText("");
-    }
+    setStreamingAssistantText("");
     setInput("");
     setAttachments([]);
     setIsLoading(true);
     setActivityPhase(imageIntent ? "image" : "thinking");
-    setNote("Готово");
+    setNote(imageIntent ? "Создаю изображение… обычно до минуты" : "Готово");
+
+    const abortController = new AbortController();
+    activeRequestRef.current = abortController;
 
     try {
       const response = await fetch(imageIntent ? "/api/images" : "/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        signal: abortController.signal,
         body: JSON.stringify(
           imageIntent
             ? { prompt: trimmed, documentIds: readyDocumentIds, conversationId }
@@ -724,11 +1354,8 @@ export default function Home() {
 
       if (imageIntent) {
         const data = await response.json();
-        setMessages((current) => [
-          ...current,
-          {
-            role: "assistant",
-            content: data.answer,
+        setMessages((current) =>
+          replaceLastAssistantMessage(current, data.answer ?? "Готово.", {
             imageUrl: data.imageUrl,
             attachments: data.documentId
               ? [
@@ -743,20 +1370,34 @@ export default function Home() {
                   }
                 ]
               : undefined
-          }
-        ]);
+          })
+        );
       } else {
-        await streamAssistantMessage(response);
+        await streamAssistantMessage(response, abortController.signal);
       }
 
       setNote("Готово");
       void loadRecentConversations();
     } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        setNote("Остановлено");
+        setMessages((current) => {
+          const last = current[current.length - 1];
+          if (last?.role === "assistant" && !last.content && !last.imageUrl) {
+            return current.slice(0, -1);
+          }
+          return current;
+        });
+        return;
+      }
+
       setStreamingAssistantText(null);
       setMessages((current) => {
         const last = current[current.length - 1];
         const withoutEmptyAssistant =
-          last?.role === "assistant" && !last.content ? current.slice(0, -1) : current;
+          last?.role === "assistant" && !last.content && !last.imageUrl
+            ? current.slice(0, -1)
+            : current;
         return [
           ...withoutEmptyAssistant,
           {
@@ -770,34 +1411,50 @@ export default function Home() {
       });
       setNote("Нужна проверка настроек");
     } finally {
+      activeRequestRef.current = null;
+      streamReaderRef.current = null;
       setIsLoading(false);
       setStreamingAssistantText(null);
+      setActivityPhase(null);
     }
   }
 
-  async function streamAssistantMessage(response: Response) {
+  async function streamAssistantMessage(response: Response, signal?: AbortSignal) {
     const reader = response.body?.getReader();
     if (!reader) throw new Error("Ответ пришёл без stream body.");
+
+    streamReaderRef.current = reader;
 
     const decoder = new TextDecoder();
     let fullText = "";
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      while (true) {
+        if (signal?.aborted) {
+          await reader.cancel();
+          throw new DOMException("The operation was aborted.", "AbortError");
+        }
 
-      fullText += decoder.decode(value, { stream: true });
-      setStreamingAssistantText(fullText);
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        fullText += decoder.decode(value, { stream: true });
+        setStreamingAssistantText(fullText);
+      }
+
+      const trailing = decoder.decode();
+      if (trailing) {
+        fullText += trailing;
+        setStreamingAssistantText(fullText);
+      }
+
+      setMessages((current) => replaceLastAssistantMessage(current, fullText));
+      setStreamingAssistantText(null);
+    } finally {
+      if (streamReaderRef.current === reader) {
+        streamReaderRef.current = null;
+      }
     }
-
-    const trailing = decoder.decode();
-    if (trailing) {
-      fullText += trailing;
-      setStreamingAssistantText(fullText);
-    }
-
-    setMessages((current) => replaceLastAssistantMessage(current, fullText));
-    setStreamingAssistantText(null);
   }
 
   async function readError(response: Response) {
@@ -826,6 +1483,13 @@ export default function Home() {
   async function startRecording() {
     if (isRecording) {
       stopRecording("cancel");
+      return;
+    }
+
+    if (!window.isSecureContext) {
+      setNote(
+        "Микрофон с iPhone по HTTP (192.168…) недоступен. Используй HTTPS или tbrain.vercel.app."
+      );
       return;
     }
 
@@ -889,8 +1553,12 @@ export default function Home() {
       recorder.start();
       setIsRecording(true);
       setNote("Идёт запись");
-    } catch {
-      setNote("Браузер не дал доступ к микрофону");
+    } catch (error) {
+      setNote(
+        error instanceof Error
+          ? `Микрофон: ${error.message}`
+          : "Браузер не дал доступ к микрофону"
+      );
     }
   }
 
@@ -987,210 +1655,10 @@ export default function Home() {
         </button>
       ) : null}
 
-      <aside className="sidebar">
-        <div className="sidebar-fixed">
-          <div className="sidebar-header">
-            <div className="sidebar-brand">
-              <span className="brand-accent">T</span>Brain
-            </div>
-            <button
-              aria-label="Скрыть sidebar"
-              className="sidebar-close"
-              onClick={() => {
-                if (window.matchMedia("(max-width: 800px)").matches) {
-                  setSidebarOpen(false);
-                } else {
-                  setSidebarCollapsed(true);
-                }
-              }}
-              type="button"
-            >
-              <PanelLeftClose size={18} />
-            </button>
-          </div>
-
-          <div className="sidebar-actions">
-            <button className="sidebar-action sidebar-action-new-chat" onClick={resetToNewChat} type="button">
-              <span aria-hidden className="sidebar-action-icon-wrap">
-                <Zap size={16} strokeWidth={1.5} />
-              </span>
-              Новый чат
-            </button>
-
-            <label className="search-box">
-              <Search size={17} />
-              <input
-                aria-label="Поиск"
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Поиск"
-                value={search}
-              />
-              {search ? (
-                <button
-                  aria-label="Очистить поиск"
-                  className="search-clear"
-                  onClick={clearSearch}
-                  type="button"
-                >
-                  <X size={15} />
-                </button>
-              ) : null}
-            </label>
-
-            <SidebarMoreMenu
-              onFiles={() => {
-                setLibraryView("files");
-                resetToNewChat();
-              }}
-              onImages={() => {
-                setLibraryView("images");
-                resetToNewChat();
-              }}
-              onSettings={() => {
-                setLibraryView("settings");
-              }}
-            />
-          </div>
-
-          <div aria-hidden="true" className="sidebar-divider" />
-        </div>
-
-        <div className="sidebar-scroll">
-          <button
-            className="sidebar-section-toggle"
-            onClick={() => setProjectsCollapsed((current) => !current)}
-            type="button"
-          >
-            {projectsCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
-            Проекты
-          </button>
-
-          {!projectsCollapsed ? (
-            <ProjectFolderList
-              activeConversationId={activeConversationId}
-              conversations={conversations}
-              conversationTitle={conversationTitle}
-              draggingConversationId={draggingConversationId}
-              dropTargetProjectId={dropTargetProjectId}
-              expandedProjectIds={expandedProjectIds}
-              onCloseMenu={() => setOpenMenuProjectId(null)}
-              onCreateProject={() => void createProject()}
-              onConversationContextMenu={openChatContextMenu}
-              onDeleteProject={(projectId) => void deleteProjectById(projectId)}
-              onDragConversationEnd={handleConversationDragEnd}
-              onDragConversationStart={handleConversationDragStart}
-              onDragOverProject={(projectId) => setDropTargetProjectId(String(projectId))}
-              onDropOnProject={(projectId) => {
-                if (draggingConversationId != null) {
-                  void moveConversationToProject(draggingConversationId, projectId);
-                }
-              }}
-              onOpenConversation={openConversation}
-              onOpenMenu={setOpenMenuProjectId}
-              onRenameProject={(projectId, title) => void renameProject(projectId, title)}
-              onToggleProject={toggleProject}
-              openMenuProjectId={openMenuProjectId}
-              projects={projects}
-            />
-          ) : null}
-
-          {!search.trim() ? (
-            <>
-              <div aria-hidden="true" className="sidebar-divider sidebar-divider-scroll" />
-              <button
-                className="sidebar-section-toggle"
-                onClick={() => setRecentCollapsed((current) => !current)}
-                type="button"
-              >
-                {recentCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
-                Недавние
-              </button>
-
-              {!recentCollapsed ? (
-                <nav
-                  className={`conversation-list ${
-                    dropTargetProjectId === "general" ? "is-drop-target" : ""
-                  }`}
-                  onDragOver={(event) => {
-                    event.preventDefault();
-                    if (draggingConversationId != null) setDropTargetProjectId("general");
-                  }}
-                  onDrop={(event) => {
-                    event.preventDefault();
-                    if (draggingConversationId != null) {
-                      void moveConversationToProject(draggingConversationId, null);
-                    }
-                  }}
-                >
-                  {generalConversations.length ? (
-                    generalConversations.map((conversation, index) => (
-                      <button
-                        className={`conversation-item ${
-                          String(conversation.id) === String(activeConversationId) ? "active" : ""
-                        } ${String(draggingConversationId) === String(conversation.id) ? "is-dragging" : ""}`}
-                        draggable
-                        key={conversation.id}
-                        onClick={() => openConversation(conversation.id)}
-                        onContextMenu={(event) => openChatContextMenu(event, conversation.id)}
-                        onDragEnd={handleConversationDragEnd}
-                        onDragStart={() => handleConversationDragStart(conversation.id)}
-                        type="button"
-                      >
-                        <span>
-                          {conversationTitle(conversation, generalConversations, index)}
-                        </span>
-                      </button>
-                    ))
-                  ) : (
-                    <p className="sidebar-empty">Пока нет чатов</p>
-                  )}
-                </nav>
-              ) : null}
-            </>
-          ) : null}
-
-          {search.trim() ? (
-            searchResults.length > 0 ? (
-            <div className="search-results">
-              <div className="sidebar-section-title">Найдено</div>
-              {searchResults.slice(0, 12).map((result) => (
-                <button
-                  className="search-result"
-                  key={`${result.type}-${result.id}`}
-                  onClick={() => openSearchResult(result)}
-                  type="button"
-                >
-                  <span className="search-result-type">{result.typeLabel}</span>
-                  <strong>{result.title}</strong>
-                  {result.snippet ? <span>{result.snippet}</span> : null}
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="search-results-empty">Ничего не найдено</div>
-          )) : null}
-        </div>
-
-        <div
-          aria-hidden="true"
-          className="sidebar-resize-handle"
-          onPointerDown={startSidebarResize}
-        >
-          <GripVertical size={14} />
-        </div>
-      </aside>
-
-      {sidebarOpen ? (
-        <button
-          aria-label="Закрыть историю"
-          className="sidebar-backdrop"
-          onClick={() => setSidebarOpen(false)}
-          type="button"
-        />
-      ) : null}
-
       <section
-        className={`chat-shell ${hasMessages ? "with-messages" : "empty"}`}
+        className={`chat-shell ${pinComposerToBottom ? "with-messages" : "empty"} ${
+          activeConversationId || showProjectView ? "has-active-chat" : ""
+        } ${showProjectView ? "has-project-view" : ""}`}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
@@ -1203,28 +1671,125 @@ export default function Home() {
           </div>
         ) : null}
         <header className="top-bar">
-          {/*
           <button
-            aria-label="История"
-          */}
+            aria-expanded={sidebarOpen}
+            aria-label={sidebarOpen ? "Закрыть меню" : "Открыть меню"}
+            className="mobile-menu-button"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              toggleSidebar();
+            }}
+            type="button"
+          >
+            {sidebarOpen ? <X size={20} /> : <PanelLeftOpen size={20} />}
+          </button>
           <div className="brand">
-            <div className="brand-mark">T</div>
             <div className="brand-title">
               <strong>
                 <span className="brand-accent">T</span>Brain
               </strong>
-              <span>Умный чат с личной памятью</span>
+              <span>
+                {showProjectView && activeProject ? (
+                  activeProject.title
+                ) : activeConversationId ? (
+                  isRenamingChat ? (
+                    <input
+                      aria-label="Название чата"
+                      className="chat-title-rename-input"
+                      maxLength={80}
+                      onBlur={() => {
+                        void submitChatRename();
+                      }}
+                      onChange={(event) => setRenameChatValue(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          void submitChatRename();
+                        }
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelChatRename();
+                        }
+                      }}
+                      ref={chatRenameInputRef}
+                      value={renameChatValue}
+                    />
+                  ) : (
+                    <span
+                      className="chat-title-label"
+                      onDoubleClick={beginChatRename}
+                      title="Дважды нажмите, чтобы переименовать"
+                    >
+                      {activeChatTitle}
+                    </span>
+                  )
+                ) : (
+                  "Умный чат с личной памятью"
+                )}
+              </span>
             </div>
           </div>
+          {activeConversationId ? (
+            <div className="top-bar-actions">
+              <button
+                aria-label={isActiveConversationPinned ? "Открепить чат" : "Закрепить чат"}
+                aria-pressed={isActiveConversationPinned}
+                className={`chat-share-button chat-pin-button ${
+                  isActiveConversationPinned ? "is-pinned" : ""
+                }`}
+                onClick={() => {
+                  void toggleConversationPin();
+                }}
+                title={isActiveConversationPinned ? "Открепить чат" : "Закрепить чат"}
+                type="button"
+              >
+                <Pin size={18} />
+              </button>
+              <button
+                aria-label="Файлы чата"
+                className="chat-share-button"
+                onClick={openChatFilesPanel}
+                title="Файлы чата"
+                type="button"
+              >
+                <FileText size={18} />
+              </button>
+              <button
+                aria-label="Копировать ссылку на чат"
+                className="chat-share-button"
+                onClick={() => {
+                  if (activeConversationId) void copyChatLink(activeConversationId);
+                }}
+                title="Копировать ссылку на чат"
+                type="button"
+              >
+                <Link2 size={18} />
+              </button>
+            </div>
+          ) : null}
         </header>
 
         <section
-          className={`messages ${hasMessages ? "" : "empty"}`}
-          key={String(activeConversationId ?? "no-conversation")}
+          className={`messages ${hasMessages ? "" : "empty"} ${showProjectView ? "project-view" : ""}`}
+          key={String(activeConversationId ?? activeProjectId ?? "no-conversation")}
           ref={messagesRef}
           aria-live="polite"
         >
-          {!hasMessages && libraryView === "settings" ? (
+          {showProjectView && activeProject ? (
+            <ProjectNavigator
+              conversations={projectConversations}
+              onBack={closeProjectView}
+              onNewChat={() => {
+                void startNewChat();
+              }}
+              onOpenConversation={openConversation}
+              onOpenFile={handleOpenNavFile}
+              projectId={activeProject.id}
+              projectTitle={activeProject.title}
+            />
+          ) : null}
+          {!hasMessages && !showProjectView && libraryView === "settings" ? (
             <div className="empty-state">
               <div>
                 <h1>Настройки</h1>
@@ -1232,7 +1797,7 @@ export default function Home() {
               </div>
             </div>
           ) : null}
-          {!hasMessages && (libraryView === "files" || libraryView === "images") ? (
+          {!hasMessages && !showProjectView && (libraryView === "files" || libraryView === "images") ? (
             <div className="empty-state">
               <div>
                 <h1>{libraryView === "files" ? "Файлы" : "Изображения"}</h1>
@@ -1240,7 +1805,7 @@ export default function Home() {
               </div>
             </div>
           ) : null}
-          {!hasMessages && !libraryView ? (
+          {!hasMessages && !showProjectView && !libraryView && !activeConversationId ? (
             <div className="empty-state">
               <div>
                 <h1>
@@ -1249,7 +1814,7 @@ export default function Home() {
               </div>
             </div>
           ) : null}
-          {hasMessages ? (
+          {hasMessages && !showProjectView ? (
             messages.map((message, index) => {
               const isStreamingBubble =
                 message.role === "assistant" &&
@@ -1285,12 +1850,16 @@ export default function Home() {
                   {visibleAttachments.length ? (
                     <MessageAttachments
                       attachments={visibleAttachments}
+                      onOpen={(attachment) => void openFileAttachment(attachment)}
                       onPreview={setPreviewImage}
                     />
                   ) : null}
                   {generatedImageUrl ? (
                     <img
                       className="generated-image"
+                      decoding="async"
+                      loading={index >= messages.length - 2 ? "eager" : "lazy"}
+                      onLoad={handleConversationMediaLoad}
                       src={generatedImageUrl}
                       alt="Generated result"
                     />
@@ -1311,7 +1880,19 @@ export default function Home() {
           <div ref={endRef} />
         </section>
 
-        <div className={`composer-wrap ${hasMessages ? "" : "empty"}`}>
+        {!showProjectView ? (
+        <div className={`composer-wrap ${pinComposerToBottom ? "" : "empty"}`}>
+          {hasMessages ? (
+            <button
+              aria-label="Перейти в конец чата"
+              className={`scroll-to-bottom-button ${showScrollToBottom ? "is-visible" : ""}`}
+              onClick={scrollToChatBottom}
+              title="Перейти в конец чата"
+              type="button"
+            >
+              <ChevronDown size={20} />
+            </button>
+          ) : null}
           {highlightTerm && matchCount > 0 ? (
             <div className="search-navigation">
               <span>
@@ -1365,27 +1946,38 @@ export default function Home() {
           <form className="composer" onSubmit={onSubmit}>
             <input
               accept=".pdf,.docx,.txt,.md,.csv,.json,.xlsx,.xls,.png,.jpg,.jpeg,.webp"
+              disabled={isLoading || isRecording}
+              id="composer-file-input"
               ref={fileInputRef}
               className="file-input"
               multiple
               onChange={(event) => void onFilesSelected(event.target.files)}
               type="file"
             />
-            <button
-              aria-label={isRecording ? "Отменить запись" : "Добавить файл"}
-              className="icon-button"
-              disabled={isLoading}
-              onClick={() =>
-                isRecording ? stopRecording("cancel") : fileInputRef.current?.click()
-              }
-              title={isRecording ? "Отменить запись" : "Добавить файл"}
-              type="button"
-            >
-              {isRecording ? <Square size={20} /> : <Paperclip size={20} />}
-            </button>
+            {isRecording ? (
+              <button
+                aria-label="Отменить запись"
+                className="icon-button cancel-action"
+                disabled={isLoading}
+                onClick={() => stopRecording("cancel")}
+                title="Отменить запись"
+                type="button"
+              >
+                <Square size={20} />
+              </button>
+            ) : (
+              <label
+                aria-label="Добавить файл"
+                className={`icon-button composer-tool file-attach-label ${isLoading ? "disabled" : ""}`}
+                htmlFor="composer-file-input"
+                title="Добавить файл"
+              >
+                <Paperclip size={20} />
+              </label>
+            )}
             <button
               aria-label={isRecording ? "Запись идёт" : "Начать запись"}
-              className={`icon-button ${isRecording ? "recording" : ""}`}
+              className={`icon-button composer-tool ${isRecording ? "recording" : ""}`}
               disabled={isLoading || isRecording}
               onClick={startRecording}
               title={isRecording ? "Запись идёт" : "Микрофон"}
@@ -1393,38 +1985,266 @@ export default function Home() {
             >
               <Mic size={20} />
             </button>
-            <textarea
-              ref={textareaRef}
-              aria-label="Сообщение"
+            <ComposerTextarea
               disabled={isLoading || isRecording}
-              onChange={(event) => setInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
-                  event.preventDefault();
-                  void sendMessage(input);
-                }
+              onChange={setInput}
+              onSubmit={() => {
+                void sendMessage(input);
               }}
-              placeholder="Спросите что-нибудь..."
-              rows={1}
               value={input}
             />
             <button
-              aria-label={isRecording ? "Отправить запись" : "Отправить"}
-              className="icon-button primary"
-              disabled={isLoading || (!isRecording && !input.trim() && attachments.length === 0)}
-              title={isRecording ? "Отправить запись" : "Отправить"}
-              type="submit"
+              aria-label={isLoading ? "Остановить генерацию" : isRecording ? "Отправить запись" : "Отправить"}
+              className={`icon-button primary ${isLoading ? "stop-generation" : ""}`}
+              disabled={!isLoading && (isRecording ? false : !input.trim() && attachments.length === 0)}
+              onClick={isLoading ? stopGeneration : undefined}
+              title={isLoading ? "Остановить" : isRecording ? "Отправить запись" : "Отправить"}
+              type={isLoading ? "button" : "submit"}
             >
-              {isLoading ? <Loader2 className="spin" size={20} /> : <Send size={20} />}
+              {isLoading ? <Square size={18} fill="currentColor" /> : <Send size={20} />}
             </button>
           </form>
           {note && note !== "Готово" && !showChatIndicator && !showCompactIndicator ? (
             <div className="composer-note">{note}</div>
           ) : null}
         </div>
+        ) : null}
       </section>
 
-      {previewImage?.fullUrl ? (
+      <aside aria-label="Навигация" className="sidebar">
+        <div className="sidebar-fixed">
+          <div className="sidebar-header">
+            <div className="sidebar-brand">
+              <span className="brand-accent">T</span>Brain
+            </div>
+            <button
+              aria-label="Свернуть или закрыть меню"
+              className="sidebar-close"
+              onClick={() => {
+                if (isMobileViewport()) {
+                  setSidebarOpen(false);
+                } else {
+                  setSidebarCollapsed(true);
+                }
+              }}
+              type="button"
+            >
+              <span aria-hidden className="sidebar-close-desktop">
+                <PanelLeftClose size={18} />
+              </span>
+              <span aria-hidden className="sidebar-close-mobile">
+                <X size={18} />
+              </span>
+            </button>
+          </div>
+
+          <div className="sidebar-actions">
+            <button
+              className="sidebar-action sidebar-action-new-chat"
+              onClick={() => {
+                void startNewChat();
+              }}
+              type="button"
+            >
+              <span aria-hidden className="sidebar-action-icon-wrap">
+                <Zap size={16} strokeWidth={1.5} />
+              </span>
+              Новый чат
+            </button>
+
+            <label className="search-box">
+              <Search size={17} />
+              <input
+                aria-label="Поиск"
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Поиск"
+                value={search}
+              />
+              {search ? (
+                <button
+                  aria-label="Очистить поиск"
+                  className="search-clear"
+                  onClick={clearSearch}
+                  type="button"
+                >
+                  <X size={15} />
+                </button>
+              ) : null}
+            </label>
+
+            <SidebarMoreMenu
+              onFiles={() => {
+                setLibraryView("files");
+                resetToNewChat();
+                closeSidebarIfMobile();
+              }}
+              onImages={() => {
+                setLibraryView("images");
+                resetToNewChat();
+                closeSidebarIfMobile();
+              }}
+              onSettings={() => {
+                setLibraryView("settings");
+                closeSidebarIfMobile();
+              }}
+            />
+          </div>
+
+          <div aria-hidden="true" className="sidebar-divider" />
+        </div>
+
+        <div className="sidebar-scroll">
+          <div className="sidebar-section-header">
+            <button
+              className="sidebar-section-toggle sidebar-section-toggle-main"
+              onClick={() => setProjectsCollapsed((current) => !current)}
+              type="button"
+            >
+              {projectsCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+              <span className="sidebar-section-label">
+                Проекты
+                <span className="sidebar-section-count">({projects.length})</span>
+              </span>
+            </button>
+            {!projectsCollapsed && projects.length > 0 ? (
+              <button
+                aria-label={allProjectsExpanded ? "Свернуть все проекты" : "Развернуть все проекты"}
+                className="projects-expand-all-button"
+                onClick={toggleAllProjectsExpanded}
+                title={allProjectsExpanded ? "Свернуть все" : "Развернуть все"}
+                type="button"
+              >
+                {allProjectsExpanded ? <ChevronsUp size={15} /> : <ChevronsDown size={15} />}
+              </button>
+            ) : null}
+          </div>
+
+          {!projectsCollapsed ? (
+            <ProjectFolderList
+              activeConversationId={activeConversationId}
+              conversations={conversations}
+              conversationTitle={conversationTitle}
+              draggingConversationId={draggingConversationId}
+              dropTargetProjectId={dropTargetProjectId}
+              expandedProjectIds={expandedProjectIds}
+              onCloseMenu={() => setOpenMenuProjectId(null)}
+              onCreateProject={() => void createProject()}
+              onConversationContextMenu={openChatContextMenu}
+              onDeleteProject={(projectId) => void deleteProjectById(projectId)}
+              onDragConversationEnd={handleConversationDragEnd}
+              onDragConversationStart={handleConversationDragStart}
+              onDragOverProject={(projectId) => setDropTargetProjectId(String(projectId))}
+              onDropOnProject={(projectId) => {
+                if (draggingConversationId != null) {
+                  void moveConversationToProject(draggingConversationId, projectId);
+                }
+              }}
+              onOpenConversation={openConversation}
+              onOpenProject={openProject}
+              onOpenMenu={setOpenMenuProjectId}
+              onRenameProject={(projectId, title) => void renameProject(projectId, title)}
+              onToggleProject={toggleProject}
+              openMenuProjectId={openMenuProjectId}
+              projects={projects}
+            />
+          ) : null}
+
+          {!search.trim() ? (
+            <>
+              <div aria-hidden="true" className="sidebar-divider sidebar-divider-scroll" />
+              <button
+                className="sidebar-section-toggle"
+                onClick={() => setRecentCollapsed((current) => !current)}
+                type="button"
+              >
+                {recentCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                Недавние
+              </button>
+
+              {!recentCollapsed ? (
+                <nav
+                  className={`conversation-list ${
+                    dropTargetProjectId === "general" ? "is-drop-target" : ""
+                  }`}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    if (draggingConversationId != null) setDropTargetProjectId("general");
+                  }}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    if (draggingConversationId != null) {
+                      void moveConversationToProject(draggingConversationId, null);
+                    }
+                  }}
+                >
+                  {generalConversations.length ? (
+                    generalConversations.map((conversation, index) => (
+                      <button
+                        className={`conversation-item ${
+                          String(conversation.id) === String(activeConversationId) ? "active" : ""
+                        } ${String(draggingConversationId) === String(conversation.id) ? "is-dragging" : ""} ${
+                          isConversationPinned(conversation) ? "is-pinned" : ""
+                        }`}
+                        draggable
+                        key={conversation.id}
+                        onClick={() => openConversation(conversation.id)}
+                        onContextMenu={(event) => openChatContextMenu(event, conversation.id)}
+                        onDragEnd={handleConversationDragEnd}
+                        onDragStart={() => handleConversationDragStart(conversation.id)}
+                        type="button"
+                      >
+                        <span className="conversation-item-title">
+                          {conversationTitle(conversation, generalConversations, index)}
+                        </span>
+                        {isConversationPinned(conversation) ? (
+                          <Pin aria-hidden className="conversation-pin-icon" size={11} strokeWidth={2} />
+                        ) : null}
+                      </button>
+                    ))
+                  ) : (
+                    <p className="sidebar-empty">Пока нет чатов</p>
+                  )}
+                </nav>
+              ) : null}
+            </>
+          ) : null}
+
+          {search.trim() ? (
+            <SearchResultsList
+              onSelect={openSearchResult}
+              query={search}
+              results={searchResults}
+            />
+          ) : null}
+        </div>
+
+        <SidebarUserProfile
+          onNotify={setNote}
+          onSettings={() => {
+            setLibraryView("settings");
+            closeSidebarIfMobile();
+          }}
+        />
+
+        <div
+          aria-hidden="true"
+          className="sidebar-resize-handle"
+          onPointerDown={startSidebarResize}
+        >
+          <GripVertical size={14} />
+        </div>
+      </aside>
+
+      {sidebarOpen ? (
+        <button
+          aria-label="Закрыть историю"
+          className="sidebar-backdrop"
+          onClick={() => setSidebarOpen(false)}
+          type="button"
+        />
+      ) : null}
+
+      {previewImage ? (
         <div className="image-modal" role="dialog" aria-modal="true">
           <button
             aria-label="Закрыть изображение"
@@ -1441,16 +2261,40 @@ export default function Home() {
             >
               <X size={20} />
             </button>
-            <img src={previewImage.fullUrl} alt={previewImage.fileName} />
+            {previewImage.fullUrl || previewImage.previewUrl ? (
+              <img
+                src={previewImage.fullUrl ?? previewImage.previewUrl ?? ""}
+                alt={previewImage.fileName}
+              />
+            ) : previewImage.id != null ? (
+              <img
+                src={buildDocumentDownloadUrl(previewImage.id, true)}
+                alt={previewImage.fileName}
+              />
+            ) : null}
             <div>{previewImage.fileName}</div>
           </div>
         </div>
       ) : null}
 
+      {showChatFilesPanel && activeConversationId ? (
+        <ChatFilesPanel
+          conversationId={activeConversationId}
+          conversationTitle={activeChatTitle}
+          onClose={() => setShowChatFilesPanel(false)}
+          onOpenFile={handleOpenNavFile}
+        />
+      ) : null}
+
       {chatContextMenu ? (
         <ChatContextMenu
           onClose={() => setChatContextMenu(null)}
+          onCopyLink={() => void copyChatLink(chatContextMenu.conversationId)}
           onCreateProject={() => createProjectFromChat(chatContextMenu.conversationId)}
+          onOpenFiles={() => {
+            openConversation(chatContextMenu.conversationId);
+            setShowChatFilesPanel(true);
+          }}
           x={chatContextMenu.x}
           y={chatContextMenu.y}
         />
@@ -1459,11 +2303,15 @@ export default function Home() {
   );
 }
 
-function replaceLastAssistantMessage(messages: ChatMessage[], content: string) {
+function replaceLastAssistantMessage(
+  messages: ChatMessage[],
+  content: string,
+  extras: Partial<ChatMessage> = {}
+) {
   const next = [...messages];
   const last = next[next.length - 1];
   if (last?.role === "assistant") {
-    next[next.length - 1] = { ...last, content };
+    next[next.length - 1] = { ...last, content, ...extras };
   }
   return next;
 }
@@ -1552,10 +2400,24 @@ function conversationTitle(
 
 function resolveGeneratedImageUrl(message: ChatMessage) {
   if (message.imageUrl) return message.imageUrl;
+
+  const metadata = message.metadata ?? {};
+  const previewUrl =
+    typeof metadata.image_preview_url === "string" ? metadata.image_preview_url : null;
+  if (previewUrl) return previewUrl;
+
+  if (typeof metadata.generated_document_id === "string" || typeof metadata.generated_document_id === "number") {
+    return buildDocumentDownloadUrl(metadata.generated_document_id, true);
+  }
+
   const generated = message.attachments?.find(
     (attachment) => attachment.metadata?.kind === "generated_image"
   );
-  return generated?.previewUrl ?? generated?.fullUrl ?? undefined;
+  return (
+    generated?.previewUrl ??
+    generated?.fullUrl ??
+    (generated?.id != null ? buildDocumentDownloadUrl(generated.id, true) : undefined)
+  );
 }
 
 function normalizeConversationTitle(title: string | null) {
@@ -1565,11 +2427,69 @@ function normalizeConversationTitle(title: string | null) {
   return trimmed;
 }
 
+function canOpenDocumentInline(fileName: string, fileType: string) {
+  const lowerName = fileName.toLowerCase();
+  const lowerType = fileType.toLowerCase();
+  return (
+    lowerName.endsWith(".pdf") ||
+    lowerType === "application/pdf" ||
+    lowerName.endsWith(".txt") ||
+    lowerName.endsWith(".md") ||
+    lowerType.startsWith("text/")
+  );
+}
+
+function buildDocumentDownloadUrl(documentId: string | number, inline: boolean) {
+  const suffix = inline ? "?inline=1" : "";
+  return `/api/documents/${documentId}/download${suffix}`;
+}
+
+function triggerDocumentDownloadLink(url: string, fileName: string, inline: boolean) {
+  const link = document.createElement("a");
+  link.href = url;
+  link.rel = "noopener noreferrer";
+  if (inline) {
+    link.target = "_blank";
+  } else {
+    link.download = fileName;
+  }
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
+async function downloadDocumentViaBlob(url: string, fileName: string, inline: boolean) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error("Download failed");
+  }
+
+  const blob = await response.blob();
+  const blobUrl = URL.createObjectURL(blob);
+
+  if (inline) {
+    window.location.assign(blobUrl);
+    window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+    return;
+  }
+
+  const link = document.createElement("a");
+  link.href = blobUrl;
+  link.download = fileName;
+  link.rel = "noopener noreferrer";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+}
+
 function MessageAttachments({
   attachments,
+  onOpen,
   onPreview
 }: {
   attachments: FileAttachment[];
+  onOpen: (attachment: FileAttachment) => void;
   onPreview: (attachment: FileAttachment) => void;
 }) {
   return (
@@ -1586,13 +2506,19 @@ function MessageAttachments({
             <span>{attachment.fileName}</span>
           </button>
         ) : (
-          <div className="message-file-attachment" key={attachment.id ?? attachment.fileName}>
+          <button
+            className="message-file-attachment"
+            key={attachment.id ?? attachment.fileName}
+            onClick={() => onOpen(attachment)}
+            title="Открыть или скачать файл"
+            type="button"
+          >
             <div className="message-file-icon">{iconForAttachment(attachment)}</div>
             <div className="message-file-meta">
-              <strong>{attachment.fileName}</strong>
+              <strong>{spreadsheetDisplayName(attachment)}</strong>
               <span>{attachmentDetails(attachment)}</span>
             </div>
-          </div>
+          </button>
         )
       )}
     </div>
@@ -1610,10 +2536,14 @@ function UploadAttachmentCard({
     <div className={`attachment-card ${attachment.status ?? "ready"}`}>
       <div className="attachment-file-icon">{iconForAttachment(attachment)}</div>
       <div className="attachment-meta">
-        <div className="attachment-name">{attachment.fileName}</div>
+        <div className="attachment-name">{spreadsheetDisplayName(attachment)}</div>
         <div className="attachment-status">
           {statusText(attachment)}
-          {attachment.status !== "uploading" ? ` · ${formatFileSize(attachment.fileSize)}` : ""}
+          {attachment.status === "ready" && isSpreadsheet(attachment)
+            ? ` · ${attachmentDetails(attachment)}`
+            : attachment.status !== "uploading"
+              ? ` · ${formatFileSize(attachment.fileSize)}`
+              : ""}
         </div>
       </div>
       <div className="attachment-indicator" aria-hidden="true">
@@ -1646,17 +2576,25 @@ function statusText(attachment: FileAttachment) {
   return attachment.error ?? "Ошибка загрузки";
 }
 
+function spreadsheetDisplayName(attachment: FileAttachment) {
+  return isSpreadsheet(attachment) ? `📊 ${attachment.fileName}` : attachment.fileName;
+}
+
 function attachmentDetails(attachment: FileAttachment) {
   const metadata = attachment.metadata ?? {};
-  const parts = [formatFileSize(attachment.fileSize)];
-
-  if (attachment.fileType === "application/pdf" && typeof metadata.page_count === "number") {
-    parts.push(`${metadata.page_count} стр.`);
-  }
+  const parts: string[] = [];
 
   if (isSpreadsheet(attachment)) {
     if (typeof metadata.sheet_count === "number") parts.push(`${metadata.sheet_count} лист.`);
     if (typeof metadata.row_count === "number") parts.push(`${metadata.row_count} строк`);
+    if (parts.length === 0) parts.push(formatFileSize(attachment.fileSize));
+    return parts.join(" · ");
+  }
+
+  parts.push(formatFileSize(attachment.fileSize));
+
+  if (attachment.fileType === "application/pdf" && typeof metadata.page_count === "number") {
+    parts.push(`${metadata.page_count} стр.`);
   }
 
   return parts.join(" · ");
@@ -1677,11 +2615,17 @@ function isImage(attachment: FileAttachment) {
 }
 
 function isSpreadsheet(attachment: FileAttachment) {
+  const metadata = attachment.metadata ?? {};
   return (
+    metadata.kind === "spreadsheet" ||
+    metadata.file_type === "csv" ||
     attachment.fileType.includes("spreadsheet") ||
     attachment.fileType.includes("excel") ||
+    attachment.fileType === "text/csv" ||
+    attachment.fileType === "application/csv" ||
     attachment.fileName.toLowerCase().endsWith(".xlsx") ||
-    attachment.fileName.toLowerCase().endsWith(".xls")
+    attachment.fileName.toLowerCase().endsWith(".xls") ||
+    attachment.fileName.toLowerCase().endsWith(".csv")
   );
 }
 
