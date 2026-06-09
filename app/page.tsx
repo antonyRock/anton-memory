@@ -16,6 +16,7 @@ import { SearchResultsList } from "@/components/SearchResultsList";
 import { SidebarMoreMenu } from "@/components/SidebarMoreMenu";
 import { ComposerTextarea, type ComposerTextareaHandle } from "@/components/ComposerTextarea";
 import { VoiceRecordingPanel } from "@/components/VoiceRecordingPanel";
+import { MessageCopyButton } from "@/components/MessageCopyButton";
 import { PullToRefreshIndicator } from "@/components/PullToRefreshIndicator";
 import { SidebarUserProfile } from "@/components/SidebarUserProfile";
 import { ProjectFolderList } from "@/components/ProjectFolderList";
@@ -172,6 +173,8 @@ export default function Home() {
   const {
     isRecording,
     recordingDurationLabel,
+    recordingSizeLabel,
+    recordingSizeStatus,
     isTranscribing,
     pendingRecording,
     transcriptionError,
@@ -1863,6 +1866,11 @@ export default function Home() {
                       alt="Generated result"
                     />
                   ) : null}
+                  {message.role === "assistant" && displayContent && !isStreamingBubble ? (
+                    <div className="message-actions">
+                      <MessageCopyButton onNotify={setNote} text={displayContent} />
+                    </div>
+                  ) : null}
                 </div>
                 {message.role === "user" ? <div className="avatar avatar-user">Я</div> : null}
               </article>
@@ -1927,6 +1935,8 @@ export default function Home() {
             }}
             pendingRecording={pendingRecording}
             recordingDurationLabel={recordingDurationLabel}
+            recordingSizeLabel={recordingSizeLabel}
+            recordingSizeStatus={recordingSizeStatus}
             transcriptionError={transcriptionError}
           />
           {attachments.length > 0 ? (
@@ -1944,7 +1954,12 @@ export default function Home() {
               ))}
             </div>
           ) : null}
-          <form className="composer" onSubmit={onSubmit}>
+          <form
+            className={`composer ${isRecording ? "is-recording" : ""} ${
+              isTranscribing ? "is-transcribing" : ""
+            } ${transcriptionError && !isRecording && !isTranscribing ? "has-voice-error" : ""}`}
+            onSubmit={onSubmit}
+          >
             <input
               accept=".pdf,.docx,.txt,.md,.csv,.json,.xlsx,.xls,.png,.jpg,.jpeg,.webp"
               disabled={isLoading || isRecording || isTranscribing}
@@ -1958,7 +1973,7 @@ export default function Home() {
             {isRecording ? (
               <button
                 aria-label="Отменить запись"
-                className="icon-button cancel-action"
+                className="icon-button cancel-action composer-side-action"
                 disabled={isLoading}
                 onClick={() => stopRecording("cancel")}
                 title="Отменить запись"
@@ -1969,25 +1984,15 @@ export default function Home() {
             ) : (
               <label
                 aria-label="Добавить файл"
-                className={`icon-button composer-tool file-attach-label ${isLoading ? "disabled" : ""}`}
+                className={`icon-button composer-tool composer-side-action file-attach-label ${
+                  isLoading ? "disabled" : ""
+                }`}
                 htmlFor="composer-file-input"
                 title="Добавить файл"
               >
                 <Paperclip size={20} />
               </label>
             )}
-            <button
-              aria-label={isRecording ? "Запись идёт" : "Начать запись"}
-              className={`icon-button composer-tool ${isRecording ? "recording" : ""}`}
-              disabled={isLoading || isRecording || isTranscribing}
-              onClick={() => {
-                void startRecording();
-              }}
-              title={isRecording ? "Запись идёт" : "Микрофон"}
-              type="button"
-            >
-              <Mic size={20} />
-            </button>
             <ComposerTextarea
               disabled={isLoading || isRecording || isTranscribing}
               onChange={setInput}
@@ -1997,16 +2002,55 @@ export default function Home() {
               ref={composerTextareaRef}
               value={input}
             />
-            <button
-              aria-label={isLoading ? "Остановить генерацию" : isRecording ? "Отправить запись" : "Отправить"}
-              className={`icon-button primary ${isLoading ? "stop-generation" : ""}`}
-              disabled={!isLoading && (isRecording ? false : !input.trim() && attachments.length === 0)}
-              onClick={isLoading ? stopGeneration : undefined}
-              title={isLoading ? "Остановить" : isRecording ? "Отправить запись" : "Отправить"}
-              type={isLoading ? "button" : "submit"}
-            >
-              {isLoading ? <Square size={18} fill="currentColor" /> : <Send size={20} />}
-            </button>
+            <div className="composer-actions">
+              <button
+                aria-label={
+                  isRecording
+                    ? "Идёт запись"
+                    : isTranscribing
+                      ? "Распознавание речи"
+                      : transcriptionError
+                        ? "Ошибка распознавания"
+                        : "Начать запись"
+                }
+                aria-pressed={isRecording}
+                className={`composer-mic-button ${
+                  isRecording ? "is-recording" : ""
+                } ${isTranscribing ? "is-transcribing" : ""} ${
+                  transcriptionError && !isRecording && !isTranscribing ? "has-error" : ""
+                }`}
+                disabled={isLoading || isRecording || isTranscribing}
+                onClick={() => {
+                  void startRecording();
+                }}
+                title={
+                  isRecording
+                    ? "Идёт запись"
+                    : isTranscribing
+                      ? "Распознавание..."
+                      : transcriptionError
+                        ? "Ошибка распознавания"
+                        : "Микрофон"
+                }
+                type="button"
+              >
+                {isTranscribing ? (
+                  <Loader2 className="composer-mic-spinner" size={20} />
+                ) : (
+                  <Mic size={20} />
+                )}
+              </button>
+              <button
+                aria-label={isLoading ? "Остановить генерацию" : isRecording ? "Отправить запись" : "Отправить"}
+                className={`icon-button primary composer-send-button ${isLoading ? "stop-generation" : ""}`}
+                disabled={!isLoading && (isRecording ? false : !input.trim() && attachments.length === 0)}
+                onClick={isLoading ? stopGeneration : undefined}
+                title={isLoading ? "Остановить" : isRecording ? "Отправить запись" : "Отправить"}
+                type={isLoading ? "button" : "submit"}
+              >
+                {isLoading ? <Square size={18} fill="currentColor" /> : <Send size={20} />}
+              </button>
+            </div>
           </form>
           {note && note !== "Готово" && !showChatIndicator && !showCompactIndicator ? (
             <div className="composer-note">{note}</div>

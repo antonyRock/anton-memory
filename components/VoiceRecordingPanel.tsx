@@ -3,13 +3,16 @@
 import { Mic, RotateCcw, Trash2 } from "lucide-react";
 import {
   formatAudioSize,
-  formatRecordingDuration
+  formatRecordingDuration,
+  isAudioTooLarge
 } from "@/lib/voice-recording";
 import type { PendingVoiceRecording } from "@/lib/voice-recording-storage";
 
 type VoiceRecordingPanelProps = {
   isRecording: boolean;
   recordingDurationLabel: string;
+  recordingSizeLabel: string;
+  recordingSizeStatus: "ok" | "near" | "critical" | "over";
   isTranscribing: boolean;
   pendingRecording: PendingVoiceRecording | null;
   transcriptionError: string | null;
@@ -20,6 +23,8 @@ type VoiceRecordingPanelProps = {
 export function VoiceRecordingPanel({
   isRecording,
   recordingDurationLabel,
+  recordingSizeLabel,
+  recordingSizeStatus,
   isTranscribing,
   pendingRecording,
   transcriptionError,
@@ -28,10 +33,20 @@ export function VoiceRecordingPanel({
 }: VoiceRecordingPanelProps) {
   if (isRecording) {
     return (
-      <div aria-live="polite" className="recording-pill">
+      <div
+        aria-live="polite"
+        className={`recording-pill recording-pill-size-${recordingSizeStatus}`}
+      >
         <span className="recording-dot" />
         <span className="recording-label">Запись</span>
         <span className="recording-timer">{recordingDurationLabel}</span>
+        <span className="recording-size">{recordingSizeLabel}</span>
+        {recordingSizeStatus === "near" ? (
+          <span className="recording-size-hint">Близко к лимиту OpenAI</span>
+        ) : null}
+        {recordingSizeStatus === "critical" ? (
+          <span className="recording-size-hint is-critical">Почти лимит — завершите запись</span>
+        ) : null}
         <div className="recording-bars" aria-hidden="true">
           <span />
           <span />
@@ -46,6 +61,7 @@ export function VoiceRecordingPanel({
   if (!pendingRecording) return null;
 
   const pendingDurationSeconds = Math.max(1, Math.round(pendingRecording.durationMs / 1000));
+  const pendingTooLarge = isAudioTooLarge(pendingRecording.sizeBytes);
 
   return (
     <div aria-live="polite" className="voice-pending-banner">
@@ -69,8 +85,9 @@ export function VoiceRecordingPanel({
       <div className="voice-pending-actions">
         <button
           className="voice-pending-button"
-          disabled={isTranscribing}
+          disabled={isTranscribing || pendingTooLarge}
           onClick={onRetry}
+          title={pendingTooLarge ? "Файл превышает лимит OpenAI (25 МБ)" : undefined}
           type="button"
         >
           <RotateCcw size={14} />

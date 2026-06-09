@@ -10,10 +10,16 @@ import {
 } from "@/lib/voice-recording-storage";
 import {
   MAX_AUDIO_BYTES,
-  MAX_RECORDING_MS,
   formatAudioSize,
   formatRecordingDuration,
-  pickRecordingMimeType
+  getRecordingPartsSize,
+  getRecordingSizeStatus,
+  pickRecordingMimeType,
+  recordingSizeApproachingMessage,
+  recordingSizeCriticalMessage,
+  recordingSizeLimitMessage,
+  recordingStoppedAtSizeLimitMessage,
+  type RecordingSizeStatus
 } from "@/lib/voice-recording";
 
 type UseVoiceRecordingOptions = {
@@ -31,6 +37,8 @@ export function useVoiceRecording({
 }: UseVoiceRecordingOptions) {
   const [isRecording, setIsRecording] = useState(false);
   const [recordingSeconds, setRecordingSeconds] = useState(0);
+  const [recordingSizeBytes, setRecordingSizeBytes] = useState(0);
+  const [recordingSizeStatus, setRecordingSizeStatus] = useState<RecordingSizeStatus>("ok");
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [pendingRecording, setPendingRecording] = useState<PendingVoiceRecording | null>(null);
   const [transcriptionError, setTranscriptionError] = useState<string | null>(null);
@@ -41,18 +49,24 @@ export function useVoiceRecording({
   const recordingActionRef = useRef<"send" | "cancel">("send");
   const recordingStartedAtRef = useRef(0);
   const timerRef = useRef<number | null>(null);
-  const maxDurationTimerRef = useRef<number | null>(null);
   const transcribeRequestRef = useRef(0);
+  const sizeWarnShownNearRef = useRef(false);
+  const sizeWarnShownCriticalRef = useRef(false);
+  const sizeLimitStopTriggeredRef = useRef(false);
 
   const clearTimers = useCallback(() => {
     if (timerRef.current != null) {
       window.clearInterval(timerRef.current);
       timerRef.current = null;
     }
-    if (maxDurationTimerRef.current != null) {
-      window.clearTimeout(maxDurationTimerRef.current);
-      maxDurationTimerRef.current = null;
-    }
+  }, []);
+
+  const resetRecordingSizeTracking = useCallback(() => {
+    setRecordingSizeBytes(0);
+    setRecordingSizeStatus("ok");
+    sizeWarnShownNearRef.current = false;
+    sizeWarnShownCriticalRef.current = false;
+    sizeLimitStopTriggeredRef.current = false;
   }, []);
 
   const stopStream = useCallback(() => {
@@ -60,10 +74,39 @@ export function useVoiceRecording({
     streamRef.current = null;
   }, []);
 
+  const updateRecordingSize = useCallback(
+    (bytes: number) => {
+      const status = getRecordingSizeStatus(bytes);
+      setRecordingSizeBytes(bytes);
+      setRecordingSizeStatus(status);
+
+      if (status === "near" && !sizeWarnShownNearRef.current) {
+        sizeWarnShownNearRef.current = true;
+        onNote(recordingSizeApproachingMessage(bytes));
+      }
+
+      if (status === "critical" && !sizeWarnShownCriticalRef.current) {
+        sizeWarnShownCriticalRef.current = true;
+        onNote(recordingSizeCriticalMessage(bytes));
+      }
+
+      if (status === "over" && !sizeLimitStopTriggeredRef.current) {
+        sizeLimitStopTriggeredRef.current = true;
+        recordingActionRef.current = "send";
+        onNote(recordingStoppedAtSizeLimitMessage(bytes));
+        const recorder = recorderRef.current;
+        if (recorder && recorder.state !== "inactive") {
+          recorder.stop();
+        }
+      }
+    },
+    [onNote]
+  );
+
   const transcribeRecording = useCallback(
     async (recording: PendingVoiceRecording) => {
       if (recording.sizeBytes > MAX_AUDIO_BYTES) {
-        const message = `Запись слишком большая (${formatAudioSize(recording.sizeBytes)}). Максимум ${formatAudioSize(MAX_AUDIO_BYTES)}. Сократите запись или разделите её на части.`;
+        const message = recordingSizeLimitMessage(recording.sizeBytes);
         setTranscriptionError(message);
         onNote(message);
         return;
@@ -130,9 +173,17 @@ export function useVoiceRecording({
         durationMs
       });
       setPendingRecording(recording);
+
+      if (recording.sizeBytes > MAX_AUDIO_BYTES) {
+        const message = recordingSizeLimitMessage(recording.sizeBytes);
+        setTranscriptionError(message);
+        onNote(message);
+        return;
+      }
+
       await transcribeRecording(recording);
     },
-    [transcribeRecording]
+    [onNote, transcribeRecording]
   );
 
   const finalizeRecording = useCallback(async () => {
@@ -150,16 +201,13 @@ export function useVoiceRecording({
     await persistAndTranscribe(blob, mimeType, durationMs);
   }, [onNote, persistAndTranscribe]);
 
-  const stopRecording = useCallback(
-    (action: "send" | "cancel") => {
-      recordingActionRef.current = action;
-      const recorder = recorderRef.current;
-      if (recorder && recorder.state !== "inactive") {
-        recorder.stop();
-      }
-    },
-    []
-  );
+  const stopRecording = useCallback((action: "send" | "cancel") => {
+    recordingActionRef.current = action;
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      recorder.stop();
+    }
+  }, []);
 
   const startRecording = useCallback(async () => {
     if (disabled || isRecording || isTranscribing) return;
@@ -188,10 +236,12 @@ export function useVoiceRecording({
       chunksRef.current = [];
       recordingActionRef.current = "send";
       recordingStartedAtRef.current = Date.now();
+      resetRecordingSizeTracking();
 
       recorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           chunksRef.current.push(event.data);
+          updateRecordingSize(getRecordingPartsSize(chunksRef.current));
         }
       };
 
@@ -201,6 +251,7 @@ export function useVoiceRecording({
         recorderRef.current = null;
         setIsRecording(false);
         setRecordingSeconds(0);
+        resetRecordingSizeTracking();
 
         if (recordingActionRef.current === "cancel") {
           chunksRef.current = [];
@@ -224,12 +275,8 @@ export function useVoiceRecording({
 
       timerRef.current = window.setInterval(() => {
         setRecordingSeconds((current) => current + 1);
+        updateRecordingSize(getRecordingPartsSize(chunksRef.current));
       }, 1000);
-
-      maxDurationTimerRef.current = window.setTimeout(() => {
-        onNote("Достигнут лимит 3 минуты — запись остановлена");
-        stopRecording("send");
-      }, MAX_RECORDING_MS);
     } catch (error) {
       stopStream();
       onNote(
@@ -245,8 +292,10 @@ export function useVoiceRecording({
     isRecording,
     isTranscribing,
     onNote,
+    resetRecordingSizeTracking,
     stopRecording,
-    stopStream
+    stopStream,
+    updateRecordingSize
   ]);
 
   const retryTranscription = useCallback(async () => {
@@ -291,6 +340,9 @@ export function useVoiceRecording({
     isRecording,
     recordingSeconds,
     recordingDurationLabel: formatRecordingDuration(recordingSeconds),
+    recordingSizeBytes,
+    recordingSizeLabel: formatAudioSize(recordingSizeBytes),
+    recordingSizeStatus,
     isTranscribing,
     pendingRecording,
     transcriptionError,

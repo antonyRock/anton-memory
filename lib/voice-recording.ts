@@ -1,8 +1,12 @@
 export const VOICE_RECORDING_DB_NAME = "tbrain-voice-recordings";
 export const VOICE_RECORDING_STORE_NAME = "pending";
 
-export const MAX_RECORDING_MS = 3 * 60 * 1000;
+/** OpenAI Transcriptions API file size limit. */
 export const MAX_AUDIO_BYTES = 25 * 1024 * 1024;
+export const AUDIO_SIZE_WARN_BYTES = Math.floor(MAX_AUDIO_BYTES * 0.8);
+export const AUDIO_SIZE_CRITICAL_BYTES = Math.floor(MAX_AUDIO_BYTES * 0.95);
+
+export type RecordingSizeStatus = "ok" | "near" | "critical" | "over";
 
 const RECORDING_MIME_CANDIDATES = [
   "audio/webm;codecs=opus",
@@ -30,6 +34,24 @@ export function buildRecordingFileName(mimeType: string) {
   return "voice.webm";
 }
 
+export function getBlobPartSize(part: BlobPart) {
+  if (part instanceof Blob) return part.size;
+  if (typeof part === "string") return part.length;
+  if (part instanceof ArrayBuffer) return part.byteLength;
+  return part.byteLength;
+}
+
+export function getRecordingPartsSize(parts: BlobPart[]) {
+  return parts.reduce((total, part) => total + getBlobPartSize(part), 0);
+}
+
+export function getRecordingSizeStatus(bytes: number): RecordingSizeStatus {
+  if (bytes >= MAX_AUDIO_BYTES) return "over";
+  if (bytes >= AUDIO_SIZE_CRITICAL_BYTES) return "critical";
+  if (bytes >= AUDIO_SIZE_WARN_BYTES) return "near";
+  return "ok";
+}
+
 export function formatRecordingDuration(totalSeconds: number) {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
@@ -48,4 +70,20 @@ export function formatAudioSize(bytes: number) {
 
 export function isAudioTooLarge(bytes: number) {
   return bytes > MAX_AUDIO_BYTES;
+}
+
+export function recordingSizeLimitMessage(bytes: number) {
+  return `Запись слишком большая (${formatAudioSize(bytes)}). Лимит OpenAI — ${formatAudioSize(MAX_AUDIO_BYTES)}. Завершите запись раньше или разделите на несколько сообщений.`;
+}
+
+export function recordingSizeApproachingMessage(bytes: number) {
+  return `Приближаетесь к лимиту OpenAI: ${formatAudioSize(bytes)} из ${formatAudioSize(MAX_AUDIO_BYTES)}. Скоро нажмите Send.`;
+}
+
+export function recordingSizeCriticalMessage(bytes: number) {
+  return `Почти лимит OpenAI: ${formatAudioSize(bytes)} из ${formatAudioSize(MAX_AUDIO_BYTES)}. Завершите запись сейчас.`;
+}
+
+export function recordingStoppedAtSizeLimitMessage(bytes: number) {
+  return `Запись остановлена: достигнут лимит OpenAI (${formatAudioSize(MAX_AUDIO_BYTES)}). Сейчас ${formatAudioSize(bytes)} — распознавание недоступно. Удалите запись и начните новую короче.`;
 }

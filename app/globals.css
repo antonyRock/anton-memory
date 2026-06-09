@@ -1408,6 +1408,54 @@ button {
   padding-top: 2px;
 }
 
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.message-row.assistant:hover .message-actions,
+.message-row.assistant:focus-within .message-actions,
+.message-actions:focus-within {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.message-copy-button {
+  width: 32px;
+  height: 32px;
+  border: 1px solid rgba(255, 221, 45, 0.22);
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.04);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.message-copy-button:hover {
+  color: var(--text);
+  border-color: rgba(255, 221, 45, 0.45);
+  background: var(--tbank-yellow-soft);
+}
+
+.message-copy-button.is-copied {
+  color: var(--accent-on);
+  border-color: rgba(255, 221, 45, 0.55);
+  background: var(--accent);
+}
+
 .composer-wrap {
   position: relative;
   z-index: 10;
@@ -1472,7 +1520,7 @@ button {
   width: min(760px, calc(100vw - 32px));
   margin: 0 auto;
   display: grid;
-  grid-template-columns: auto auto 1fr auto;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: end;
   gap: 8px;
   padding: 8px;
@@ -1481,6 +1529,116 @@ button {
   background: var(--panel);
   box-shadow: var(--shadow);
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.composer.is-recording {
+  border-color: rgba(255, 90, 95, 0.45);
+  box-shadow:
+    0 0 0 1px rgba(255, 90, 95, 0.14),
+    var(--shadow);
+}
+
+.composer.is-transcribing {
+  border-color: rgba(255, 221, 45, 0.42);
+  box-shadow:
+    0 0 0 1px rgba(255, 221, 45, 0.12),
+    var(--shadow);
+}
+
+.composer.has-voice-error {
+  border-color: rgba(255, 90, 95, 0.38);
+}
+
+.composer-actions {
+  display: flex;
+  align-items: end;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.composer-side-action {
+  align-self: end;
+}
+
+.composer-mic-button {
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgba(255, 221, 45, 0.28);
+  border-radius: 999px;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  background: rgba(255, 221, 45, 0.1);
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  box-shadow: 0 0 0 0 rgba(255, 221, 45, 0);
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    background 0.15s ease,
+    box-shadow 0.15s ease,
+    transform 0.15s ease;
+}
+
+.composer-mic-button:hover:not(:disabled) {
+  color: var(--accent-on);
+  border-color: rgba(255, 221, 45, 0.62);
+  background: var(--accent);
+  box-shadow: 0 0 18px var(--tbank-yellow-glow);
+}
+
+.composer-mic-button:active:not(:disabled) {
+  transform: scale(0.96);
+}
+
+.composer-mic-button.is-recording,
+.composer-mic-button.is-recording:disabled {
+  color: #fff;
+  border-color: rgba(255, 90, 95, 0.72);
+  background: rgba(255, 90, 95, 0.22);
+  box-shadow: 0 0 0 0 rgba(255, 90, 95, 0.55);
+  animation: mic-recording-pulse 1.2s ease-in-out infinite;
+  opacity: 1;
+  cursor: default;
+}
+
+.composer-mic-button.is-transcribing,
+.composer-mic-button.is-transcribing:disabled {
+  color: var(--accent);
+  border-color: rgba(255, 221, 45, 0.55);
+  background: rgba(255, 221, 45, 0.14);
+  opacity: 1;
+  cursor: wait;
+}
+
+.composer-mic-button.has-error:not(.is-recording):not(.is-transcribing) {
+  color: #ffb4b7;
+  border-color: rgba(255, 90, 95, 0.55);
+  background: rgba(255, 90, 95, 0.12);
+}
+
+.composer-mic-button:disabled:not(.is-recording):not(.is-transcribing) {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.composer-mic-spinner {
+  animation: pull-refresh-spin 0.8s linear infinite;
+}
+
+.composer-send-button {
+  flex-shrink: 0;
+}
+
+@keyframes mic-recording-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 90, 95, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 10px rgba(255, 90, 95, 0);
+  }
 }
 
 .composer:focus-within {
@@ -1506,11 +1664,12 @@ button {
   overflow-y: hidden;
   border: 0;
   outline: 0;
-  padding: 11px 4px;
+  padding: 11px 6px;
   background: transparent;
   color: var(--text);
   line-height: 1.45;
   font-size: 16px;
+  min-width: 0;
   -webkit-user-select: text;
   user-select: text;
 }
@@ -1615,11 +1774,10 @@ button {
   box-shadow: 0 0 0 2px var(--tbank-yellow-glow);
 }
 
-.icon-button.recording {
-  color: #ffffff;
-  background: var(--danger);
-  border-color: transparent;
-  box-shadow: none;
+.composer-mic-button:focus-visible,
+.message-copy-button:focus-visible {
+  outline: 2px solid rgba(255, 221, 45, 0.55);
+  outline-offset: 2px;
 }
 
 .icon-button:disabled {
@@ -1717,6 +1875,7 @@ button {
   display: flex;
   align-items: center;
   justify-content: center;
+  flex-wrap: wrap;
   gap: 10px;
   color: #ffffff;
   font-size: 13px;
@@ -1735,6 +1894,38 @@ button {
   font-variant-numeric: tabular-nums;
   color: var(--accent);
   font-weight: 700;
+}
+
+.recording-size {
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.recording-size-hint {
+  color: rgba(255, 221, 45, 0.88);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.recording-size-hint.is-critical {
+  color: #ffb4b7;
+}
+
+.recording-pill-size-near {
+  border-color: rgba(255, 221, 45, 0.42);
+}
+
+.recording-pill-size-critical,
+.recording-pill-size-over {
+  border-color: rgba(255, 90, 95, 0.55);
+  background: rgba(255, 90, 95, 0.08);
+}
+
+.recording-pill-size-critical .recording-size,
+.recording-pill-size-over .recording-size {
+  color: #ffb4b7;
 }
 
 .voice-pending-banner {
@@ -2315,6 +2506,20 @@ button {
 
   .voice-pending-actions {
     justify-content: flex-end;
+  }
+
+  .message-row.assistant .message-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .composer {
+    gap: 6px;
+    padding: 7px;
+  }
+
+  .composer-actions {
+    gap: 4px;
   }
 }
 
