@@ -27,7 +27,7 @@ export function MessageCopyButton({ text, onNotify }: MessageCopyButtonProps) {
   return (
     <button
       aria-label={copied ? "Скопировано" : "Копировать ответ"}
-      className={`message-copy-button ${copied ? "is-copied" : ""}`}
+      className={`message-action-button ${copied ? "is-copied" : ""}`}
       onClick={() => {
         void handleCopy();
       }}

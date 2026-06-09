@@ -1,5 +1,5 @@
 import { getDocumentsForMessages } from "@/lib/documents";
-import { getCurrentUserId } from "@/lib/users";
+import { getCurrentUserId } from "@/lib/current-user";
 import {
   metadataHasHeavyPayload,
   normalizeRecordMetadata,
@@ -49,6 +49,7 @@ const LEGACY_CONVERSATION: Conversation = {
 
 export async function listConversations(search = "", projectId?: string | number | null) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const query = search.trim();
 
   if (!query) {
@@ -78,36 +79,42 @@ export async function listConversations(search = "", projectId?: string | number
       supabase
         .from("conversations")
         .select("id, title, summary, metadata, created_at, updated_at")
+        .eq("user_id", userId)
         .or(`title.ilike.${pattern},summary.ilike.${pattern}`)
         .order("updated_at", { ascending: false })
         .limit(20),
       supabase
         .from("messages")
         .select("id, conversation_id, content, created_at")
+        .eq("user_id", userId)
         .ilike("content", pattern)
         .order("created_at", { ascending: false })
         .limit(20),
       supabase
         .from("documents")
         .select("id, file_name, file_type, metadata, extracted_text, summary, created_at")
+        .eq("user_id", userId)
         .or(`file_name.ilike.${pattern},extracted_text.ilike.${pattern},summary.ilike.${pattern}`)
         .order("created_at", { ascending: false })
         .limit(10),
       supabase
         .from("facts")
         .select("id, content, fact, created_at")
+        .eq("user_id", userId)
         .or(`content.ilike.${pattern},fact.ilike.${pattern}`)
         .order("created_at", { ascending: false })
         .limit(10),
       supabase
         .from("entities")
         .select("id, name, description, created_at")
+        .eq("user_id", userId)
         .or(`name.ilike.${pattern},description.ilike.${pattern}`)
         .order("created_at", { ascending: false })
         .limit(10),
       supabase
         .from("tasks")
         .select("id, title, description, created_at")
+        .eq("user_id", userId)
         .or(`title.ilike.${pattern},description.ilike.${pattern}`)
         .order("created_at", { ascending: false })
         .limit(10),
@@ -158,6 +165,7 @@ export async function listConversations(search = "", projectId?: string | number
     const missingWithProject = await supabase
       .from("conversations")
       .select(CONVERSATION_SELECT_WITH_PROJECT)
+      .eq("user_id", userId)
       .in("id", missingIds)
       .order("updated_at", { ascending: false });
 
@@ -166,6 +174,7 @@ export async function listConversations(search = "", projectId?: string | number
         ? await supabase
             .from("conversations")
             .select(CONVERSATION_SELECT_BASE)
+            .eq("user_id", userId)
             .in("id", missingIds)
             .order("updated_at", { ascending: false })
         : missingWithProject;
@@ -193,6 +202,7 @@ export async function listConversations(search = "", projectId?: string | number
     const { data: projectRows } = await supabase
       .from("projects")
       .select("id, title")
+      .eq("user_id", userId)
       .in("id", projectIds);
     for (const project of projectRows ?? []) {
       projectTitleById.set(String(project.id), String(project.title ?? "Проект"));
@@ -289,6 +299,7 @@ export async function updateConversationTitle(
   title: string
 ) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const trimmed = title.trim().slice(0, 80);
   if (!trimmed) throw new Error("Title is required.");
 
@@ -297,6 +308,7 @@ export async function updateConversationTitle(
     .update({ title: trimmed, updated_at: new Date().toISOString() })
     .select(CONVERSATION_SELECT_WITH_PROJECT)
     .eq("id", conversationId)
+    .eq("user_id", userId)
     .single();
 
   if (error && /project_id/i.test(error.message)) {
@@ -305,6 +317,7 @@ export async function updateConversationTitle(
       .update({ title: trimmed, updated_at: new Date().toISOString() })
       .select(CONVERSATION_SELECT_BASE)
       .eq("id", conversationId)
+      .eq("user_id", userId)
       .single());
   }
 
@@ -317,10 +330,12 @@ export async function updateConversationPinned(
   pinned: boolean
 ) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const { data: current, error: readError } = await supabase
     .from("conversations")
     .select("metadata")
     .eq("id", conversationId)
+    .eq("user_id", userId)
     .single();
 
   if (readError) throw new Error(`Could not read conversation metadata: ${readError.message}`);
@@ -344,6 +359,7 @@ export async function updateConversationPinned(
     })
     .select(CONVERSATION_SELECT_WITH_PROJECT)
     .eq("id", conversationId)
+    .eq("user_id", userId)
     .single();
 
   if (error && /project_id/i.test(error.message)) {
@@ -355,6 +371,7 @@ export async function updateConversationPinned(
       })
       .select(CONVERSATION_SELECT_BASE)
       .eq("id", conversationId)
+      .eq("user_id", userId)
       .single());
   }
 
@@ -364,16 +381,19 @@ export async function updateConversationPinned(
 
 export async function getConversationMessageTexts(conversationId: string | number) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const query =
     String(conversationId) === "legacy"
       ? supabase
           .from("messages")
           .select("role, content")
+          .eq("user_id", userId)
           .order("created_at", { ascending: true })
           .limit(200)
       : supabase
           .from("messages")
           .select("role, content")
+          .eq("user_id", userId)
           .eq("conversation_id", conversationId)
           .order("created_at", { ascending: true })
           .limit(200);
@@ -406,16 +426,19 @@ async function cleanupHeavyMessageMetadata(
 
 export async function getConversationMessages(conversationId: string | number) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const query =
     String(conversationId) === "legacy"
       ? supabase
           .from("messages")
           .select("id, role, content, metadata, created_at")
+          .eq("user_id", userId)
           .order("created_at", { ascending: true })
           .limit(200)
       : supabase
           .from("messages")
           .select("id, role, content, metadata, created_at")
+          .eq("user_id", userId)
           .eq("conversation_id", conversationId)
           .order("created_at", { ascending: true })
           .limit(200);
@@ -501,12 +524,18 @@ export async function getReferencedConversationsContext(ids: Array<string | numb
   if (ids.length === 0) return "";
 
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const uniqueIds = [...new Set(ids.map((id) => String(id)))];
   const blocks: string[] = [];
 
   for (const id of uniqueIds) {
     const [{ data: conversation }, messages] = await Promise.all([
-      supabase.from("conversations").select("id, title").eq("id", id).maybeSingle(),
+      supabase
+        .from("conversations")
+        .select("id, title")
+        .eq("id", id)
+        .eq("user_id", userId)
+        .maybeSingle(),
       getConversationMessageTexts(id)
     ]);
 
@@ -531,7 +560,8 @@ export async function touchConversation(conversationId?: string | number) {
   await supabase
     .from("conversations")
     .update({ updated_at: new Date().toISOString() })
-    .eq("id", conversationId);
+    .eq("id", conversationId)
+    .eq("user_id", getCurrentUserId());
 }
 
 export async function maybeGenerateConversationTitle(input: {
@@ -541,10 +571,12 @@ export async function maybeGenerateConversationTitle(input: {
 }) {
   if (!input.conversationId || String(input.conversationId) === "legacy") return;
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const { data, error } = await supabase
     .from("conversations")
     .select("title")
     .eq("id", input.conversationId)
+    .eq("user_id", userId)
     .single();
 
   if (error) return;
@@ -572,7 +604,8 @@ export async function maybeGenerateConversationTitle(input: {
     await supabase
       .from("conversations")
       .update({ title: title.slice(0, 80), updated_at: new Date().toISOString() })
-      .eq("id", input.conversationId);
+      .eq("id", input.conversationId)
+      .eq("user_id", userId);
   } catch (error) {
     console.error("Conversation title generation failed:", error);
   }
@@ -594,11 +627,13 @@ async function queryRecentConversations(
   limit = 40
 ) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
 
   if (!projectId) {
     const withProject = await supabase
       .from("conversations")
       .select(CONVERSATION_SELECT_WITH_PROJECT)
+      .eq("user_id", userId)
       .order("updated_at", { ascending: false })
       .limit(limit);
 
@@ -609,6 +644,7 @@ async function queryRecentConversations(
     return supabase
       .from("conversations")
       .select(CONVERSATION_SELECT_BASE)
+      .eq("user_id", userId)
       .order("updated_at", { ascending: false })
       .limit(limit);
   }
@@ -616,6 +652,7 @@ async function queryRecentConversations(
   let request = supabase
     .from("conversations")
     .select(CONVERSATION_SELECT_WITH_PROJECT)
+    .eq("user_id", userId)
     .eq("project_id", projectId)
     .order("updated_at", { ascending: false })
     .limit(limit);
@@ -628,6 +665,7 @@ async function queryRecentConversations(
   return supabase
     .from("conversations")
     .select(CONVERSATION_SELECT_BASE)
+    .eq("user_id", userId)
     .order("updated_at", { ascending: false })
     .limit(limit);
 }
@@ -778,6 +816,7 @@ async function getConversationIdsForDocuments(documentIds: Array<string | number
   const messages = await supabase
     .from("messages")
     .select("id, conversation_id")
+    .eq("user_id", getCurrentUserId())
     .in("id", messageIds);
 
   if (messages.error || !messages.data?.length) return result;

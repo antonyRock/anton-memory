@@ -9,8 +9,8 @@ import {
   Sparkles,
   X
 } from "lucide-react";
-import type { FileNavGroup, FileNavItem } from "@/lib/file-navigation";
-import { resolveFileNavPreviewUrl } from "@/lib/file-navigation";
+import type { FileNavGroup, FileNavItem } from "@/lib/file-nav-shared";
+import { resolveFileNavPreviewUrl } from "@/lib/file-nav-shared";
 
 export function formatNavFileSize(size: number) {
   if (size < 1024) return `${size} Б`;

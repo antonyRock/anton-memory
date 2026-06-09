@@ -1,15 +1,14 @@
 import { NextResponse } from "next/server";
-import { getCurrentUserId, getUserProfile, getUserStats } from "@/lib/users";
+import { getCurrentUserId } from "@/lib/current-user";
+import { getUserProfile, getUserStats } from "@/lib/users";
+import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 
-export async function GET() {
-  try {
+export async function GET(request: Request) {
+  return handleAuthenticatedRoute(request, async () => {
     const userId = getCurrentUserId();
     const [profile, stats] = await Promise.all([getUserProfile(userId), getUserStats(userId)]);
     return NextResponse.json({ profile, stats });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected user load error.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  });
 }

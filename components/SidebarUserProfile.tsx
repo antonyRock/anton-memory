@@ -2,6 +2,8 @@
 
 import { BarChart3, LogOut, Settings, UserRound } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { useAuth } from "@/components/AuthProvider";
+import { useAuthFetch } from "@/hooks/useAuthFetch";
 
 type UserProfile = {
   id: string;
@@ -27,7 +29,7 @@ const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
 const EMPTY_STATS: UserStats = { chats: 0, words: 0, days: 0 };
 
 const DEFAULT_PROFILE: UserProfile = {
-  id: "00000000-0000-0000-0000-000000000001",
+  id: "f224756a-d4ae-4f09-a315-9991c03ebe84",
   displayName: "Антон",
   avatarUrl: null,
   tagline: "Ты можешь всё!"
@@ -74,6 +76,8 @@ function writeStatsCache(stats: UserStats) {
 }
 
 export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileProps) {
+  const { session, signOut } = useAuth();
+  const { authFetch } = useAuthFetch();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [profile, setProfile] = useState<UserProfile>(DEFAULT_PROFILE);
@@ -85,11 +89,18 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
 
     const handle = window.setTimeout(async () => {
       try {
-        const response = await fetch("/api/user");
+        const response = await authFetch("/api/user");
         const data = await response.json();
         if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить профиль");
 
-        if (data.profile) setProfile(data.profile as UserProfile);
+        if (data.profile) {
+          setProfile({
+            ...(data.profile as UserProfile),
+            displayName:
+              session?.user.email?.split("@")[0] ??
+              (data.profile as UserProfile).displayName
+          });
+        }
         if (data.stats) {
           const nextStats = data.stats as UserStats;
           setStats(nextStats);
@@ -101,7 +112,7 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
     }, 0);
 
     return () => window.clearTimeout(handle);
-  }, []);
+  }, [authFetch, session?.user.email]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -192,7 +203,12 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
           </button>
           <button
             className="sidebar-user-menu-item sidebar-user-menu-item-muted"
-            onClick={() => notify("Выход будет доступен после авторизации")}
+            onClick={() => {
+              void signOut().then(() => {
+                window.sessionStorage.removeItem(STATS_CACHE_KEY);
+                notify("Вы вышли из аккаунта");
+              });
+            }}
             role="menuitem"
             type="button"
           >

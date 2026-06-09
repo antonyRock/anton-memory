@@ -5,6 +5,7 @@ import {
   getProjectView,
   updateProject
 } from "@/lib/projects";
+import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 
@@ -12,18 +13,15 @@ type RouteContext = {
   params: Promise<{ id: string }>;
 };
 
-export async function GET(_request: Request, context: RouteContext) {
-  try {
+export async function GET(request: Request, context: RouteContext) {
+  return handleAuthenticatedRoute(request, async () => {
     const { id } = await context.params;
     return NextResponse.json(await getProjectView(id));
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected project error.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  });
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
-  try {
+  return handleAuthenticatedRoute(request, async () => {
     const { id } = await context.params;
     const body = await request.json();
 
@@ -44,19 +42,13 @@ export async function PATCH(request: Request, context: RouteContext) {
       body.projectId === null ? null : body.projectId ?? id
     );
     return NextResponse.json({ conversation });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected project update error.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  });
 }
 
-export async function DELETE(_request: Request, context: RouteContext) {
-  try {
+export async function DELETE(request: Request, context: RouteContext) {
+  return handleAuthenticatedRoute(request, async () => {
     const { id } = await context.params;
     await deleteProject(id);
     return NextResponse.json({ ok: true });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected project delete error.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  });
 }

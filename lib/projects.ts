@@ -1,4 +1,5 @@
 import { getSupabase } from "@/lib/supabase";
+import { getCurrentUserId } from "@/lib/current-user";
 
 export type Project = {
   id: string | number;
@@ -27,6 +28,7 @@ export async function listProjects() {
   const { data, error } = await supabase
     .from("projects")
     .select("id, title, description, metadata, created_at, updated_at")
+    .eq("user_id", getCurrentUserId())
     .order("updated_at", { ascending: false })
     .limit(50);
 
@@ -41,7 +43,8 @@ export async function createProject(input: { title?: string; description?: strin
     .from("projects")
     .insert({
       title: input.title?.trim() || "Новый проект",
-      description: input.description?.trim() || null
+      description: input.description?.trim() || null,
+      user_id: getCurrentUserId()
     })
     .select("id, title, description, metadata, created_at, updated_at")
     .single();
@@ -55,10 +58,12 @@ export async function createProject(input: { title?: string; description?: strin
 
 export async function getProjectView(projectId: string | number) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const { data: project, error: projectError } = await supabase
     .from("projects")
     .select("id, title, description, metadata, created_at, updated_at")
     .eq("id", projectId)
+    .eq("user_id", userId)
     .single();
 
   if (projectError) {
@@ -73,12 +78,14 @@ export async function getProjectView(projectId: string | number) {
       .from("conversations")
       .select("id, title, summary, metadata, created_at, updated_at, project_id")
       .eq("project_id", projectId)
+      .eq("user_id", userId)
       .order("updated_at", { ascending: false })
       .limit(50),
     supabase
       .from("documents")
       .select("id, file_name, file_type, file_size, created_at, metadata")
       .eq("project_id", projectId)
+      .eq("user_id", userId)
       .order("created_at", { ascending: false })
       .limit(100)
   ]);
@@ -117,6 +124,7 @@ export async function updateProject(
     .from("projects")
     .update(payload)
     .eq("id", projectId)
+    .eq("user_id", getCurrentUserId())
     .select("id, title, description, metadata, created_at, updated_at")
     .single();
 
@@ -129,11 +137,13 @@ export async function updateProject(
 
 export async function deleteProject(projectId: string | number) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
 
   const unassignConversations = await supabase
     .from("conversations")
     .update({ project_id: null, updated_at: new Date().toISOString() })
-    .eq("project_id", projectId);
+    .eq("project_id", projectId)
+    .eq("user_id", userId);
 
   if (
     unassignConversations.error &&
@@ -143,9 +153,17 @@ export async function deleteProject(projectId: string | number) {
     throw new Error(`Could not unassign project chats: ${unassignConversations.error.message}`);
   }
 
-  await supabase.from("documents").update({ project_id: null }).eq("project_id", projectId);
+  await supabase
+    .from("documents")
+    .update({ project_id: null })
+    .eq("project_id", projectId)
+    .eq("user_id", userId);
 
-  const { error } = await supabase.from("projects").delete().eq("id", projectId);
+  const { error } = await supabase
+    .from("projects")
+    .delete()
+    .eq("id", projectId)
+    .eq("user_id", userId);
   if (isMissingProjectsSchema(error?.message)) {
     throw new Error("Projects table is missing. Run supabase/projects_migration.sql first.");
   }
@@ -164,6 +182,7 @@ export async function assignConversationToProject(
       updated_at: new Date().toISOString()
     })
     .eq("id", conversationId)
+    .eq("user_id", getCurrentUserId())
     .select("id, title, summary, metadata, created_at, updated_at, project_id")
     .single();
 
@@ -172,6 +191,7 @@ export async function assignConversationToProject(
       .from("conversations")
       .update({ updated_at: new Date().toISOString() })
       .eq("id", conversationId)
+      .eq("user_id", getCurrentUserId())
       .select("id, title, summary, metadata, created_at, updated_at")
       .single();
     if (fallback.error) {
@@ -212,6 +232,7 @@ export async function searchProjects(pattern: string, limit = 10) {
   const { data, error } = await supabase
     .from("projects")
     .select("id, title, description, created_at, updated_at")
+    .eq("user_id", getCurrentUserId())
     .or(`title.ilike.${pattern},description.ilike.${pattern}`)
     .order("updated_at", { ascending: false })
     .limit(limit);

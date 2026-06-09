@@ -27,17 +27,34 @@ import {
 import type { MemoryExtraction } from "@/lib/memory";
 import { scheduleChatPostProcessing } from "@/lib/chat-post-processing";
 import { createRequestProfiler } from "@/lib/request-profile";
+import { runWithRequestUser } from "@/lib/request-context";
+import { ApiUnauthorizedError, resolveRequestUserId } from "@/lib/server-auth";
+import { getCurrentUserId } from "@/lib/current-user";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(request: Request) {
+  let userId: string;
+  try {
+    userId = await resolveRequestUserId(request);
+  } catch (error) {
+    if (error instanceof ApiUnauthorizedError) {
+      return NextResponse.json({ error: error.message }, { status: 401 });
+    }
+    throw error;
+  }
+
   let payload: {
     message?: string;
     documentIds?: Array<string | number>;
     conversationId?: string | number;
     recentMessages?: ChatContextMessage[];
     referencedConversationIds?: Array<string | number>;
+    replyTo?: {
+      role: "user" | "assistant";
+      content: string;
+    };
   };
 
   try {
@@ -49,6 +66,15 @@ export async function POST(request: Request) {
   const userMessage = payload.message?.trim();
   const attachedDocumentIds = payload.documentIds ?? [];
   const conversationId = payload.conversationId;
+  const replyTo =
+    payload.replyTo &&
+    (payload.replyTo.role === "user" || payload.replyTo.role === "assistant") &&
+    String(payload.replyTo.content ?? "").trim()
+      ? {
+          role: payload.replyTo.role,
+          content: String(payload.replyTo.content).trim().slice(0, 4000)
+        }
+      : null;
   const clientRecentMessages = (payload.recentMessages ?? []).filter(
     (message) =>
       (message.role === "user" || message.role === "assistant") &&
@@ -70,6 +96,7 @@ export async function POST(request: Request) {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
+      await runWithRequestUser(userId, async () => {
       const profiler = createRequestProfiler();
 
       try {
@@ -110,7 +137,15 @@ export async function POST(request: Request) {
             userMessage,
             {
               document_ids: attachedDocumentIds,
-              referenced_conversation_ids: referencedConversationIds
+              referenced_conversation_ids: referencedConversationIds,
+              ...(replyTo
+                ? {
+                    reply_to: {
+                      role: replyTo.role,
+                      content: replyTo.content.slice(0, 500)
+                    }
+                  }
+                : {})
             },
             conversationId
           );
@@ -198,6 +233,19 @@ export async function POST(request: Request) {
                     }
                   ]
                 : []),
+              ...(replyTo
+                ? [
+                    {
+                      role: "system" as const,
+                      content: [
+                        "The user is replying to a specific earlier message in this chat.",
+                        `Reply target (${replyTo.role}):`,
+                        `"""${replyTo.content}"""`,
+                        "Treat the next user message as a follow-up in that thread. Answer in direct response to both the quoted message and the new user text."
+                      ].join("\n")
+                    }
+                  ]
+                : []),
               ...shortTermMessages,
               { role: "user", content: userContent }
             ]
@@ -232,6 +280,7 @@ export async function POST(request: Request) {
           });
 
           scheduleChatPostProcessing({
+            userId: getCurrentUserId(),
             conversationId,
             userMessage,
             assistantAnswer: finalAnswer,
@@ -247,6 +296,7 @@ export async function POST(request: Request) {
         profiler.finish({ conversationId, route: "chat" });
         controller.close();
       }
+      });
     }
   });
 

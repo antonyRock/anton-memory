@@ -1,4 +1,4 @@
-import { buildDocumentInlineUrl } from "@/lib/documents";
+import { buildDocumentInlineUrl } from "@/lib/document-urls";
 
 export const HEAVY_METADATA_KEYS = [
   "inline_base64",

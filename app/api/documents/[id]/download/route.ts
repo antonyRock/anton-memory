@@ -1,4 +1,5 @@
 import { getDocumentDownloadPayload } from "@/lib/documents";
+import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 
@@ -30,7 +31,7 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
-  try {
+  return handleAuthenticatedRoute(request, async () => {
     const { id } = await context.params;
     const payload = await getDocumentDownloadPayload(id);
     if (!payload) {
@@ -57,11 +58,5 @@ export async function GET(
         "X-Content-Type-Options": "nosniff"
       }
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected document download error.";
-    return new Response(JSON.stringify({ error: message }), {
-      status: 500,
-      headers: { "Content-Type": "application/json" }
-    });
-  }
+  });
 }

@@ -1,5 +1,6 @@
 import { after } from "next/server";
 import { maybeGenerateConversationTitle } from "@/lib/conversations";
+import { runWithRequestUser } from "@/lib/request-context";
 import {
   logBackgroundMemoryExtractionFailed,
   logBackgroundMemoryExtractionFinished,
@@ -8,6 +9,7 @@ import {
 } from "@/lib/request-profile";
 
 type ChatPostProcessingInput = {
+  userId: string;
   conversationId?: string | number;
   userMessage: string;
   assistantAnswer: string;
@@ -26,24 +28,26 @@ export function scheduleChatPostProcessing(input: ChatPostProcessingInput) {
   };
 
   const task = async () => {
-    logBackgroundMemoryExtractionStarted(context);
-    const startedAt = performance.now();
+    await runWithRequestUser(input.userId, async () => {
+      logBackgroundMemoryExtractionStarted(context);
+      const startedAt = performance.now();
 
-    try {
-      await maybeGenerateConversationTitle({
-        conversationId: input.conversationId,
-        userMessage: input.userMessage,
-        assistantAnswer: input.assistantAnswer
-      });
-      await input.runMemoryExtraction(
-        input.userMessage,
-        input.assistantAnswer,
-        input.userMessageId
-      );
-      logBackgroundMemoryExtractionFinished(performance.now() - startedAt, context);
-    } catch (error) {
-      logBackgroundMemoryExtractionFailed(error, context);
-    }
+      try {
+        await maybeGenerateConversationTitle({
+          conversationId: input.conversationId,
+          userMessage: input.userMessage,
+          assistantAnswer: input.assistantAnswer
+        });
+        await input.runMemoryExtraction(
+          input.userMessage,
+          input.assistantAnswer,
+          input.userMessageId
+        );
+        logBackgroundMemoryExtractionFinished(performance.now() - startedAt, context);
+      } catch (error) {
+        logBackgroundMemoryExtractionFailed(error, context);
+      }
+    });
   };
 
   try {

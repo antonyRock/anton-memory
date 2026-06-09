@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { FileBrowserPanel } from "@/components/FileBrowserPanel";
-import type { FileNavItem } from "@/lib/file-navigation";
+import { useAuthFetch } from "@/hooks/useAuthFetch";
+import type { FileNavItem } from "@/lib/file-nav-shared";
 
 type ChatFilesPanelProps = {
   conversationId: string | number;
@@ -17,6 +18,7 @@ export function ChatFilesPanel({
   onClose,
   onOpenFile
 }: ChatFilesPanelProps) {
+  const { authFetch } = useAuthFetch();
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [files, setFiles] = useState<FileNavItem[]>([]);
@@ -26,7 +28,7 @@ export function ChatFilesPanel({
       setLoading(true);
       try {
         const params = new URLSearchParams({ kind: "all", search });
-        const response = await fetch(
+        const response = await authFetch(
           `/api/conversations/${conversationId}/files?${params.toString()}`
         );
         const data = await response.json();
@@ -40,7 +42,7 @@ export function ChatFilesPanel({
     }, 200);
 
     return () => window.clearTimeout(handle);
-  }, [conversationId, search]);
+  }, [authFetch, conversationId, search]);
 
   return (
     <div className="chat-files-overlay" role="presentation">

@@ -1,11 +1,12 @@
 import { NextResponse } from "next/server";
 import { processAndStoreFile, storedDocumentToAttachment } from "@/lib/documents";
+import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
 export async function POST(request: Request) {
-  try {
+  return handleAuthenticatedRoute(request, async () => {
     const formData = await request.formData();
     const files = formData.getAll("files").filter((file): file is File => file instanceof File);
 
@@ -33,8 +34,5 @@ export async function POST(request: Request) {
     return NextResponse.json({
       documents: attachments
     });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected file upload error.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  });
 }

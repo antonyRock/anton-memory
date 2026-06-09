@@ -1,27 +1,23 @@
 import { NextResponse } from "next/server";
-import { createProject, listProjects } from "@/lib/projects";
+import { listProjects, createProject } from "@/lib/projects";
+import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 
-export async function GET() {
-  try {
-    return NextResponse.json({ projects: await listProjects() });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected projects error.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+export async function GET(request: Request) {
+  return handleAuthenticatedRoute(request, async () => {
+    const projects = await listProjects();
+    return NextResponse.json({ projects });
+  });
 }
 
 export async function POST(request: Request) {
-  try {
-    const body = await request.json();
+  return handleAuthenticatedRoute(request, async () => {
+    const body = await request.json().catch(() => ({}));
     const project = await createProject({
-      title: typeof body.title === "string" ? body.title : undefined,
-      description: typeof body.description === "string" ? body.description : null
+      title: typeof body?.title === "string" ? body.title : undefined,
+      description: typeof body?.description === "string" ? body.description : body?.description
     });
     return NextResponse.json({ project });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected project create error.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  });
 }

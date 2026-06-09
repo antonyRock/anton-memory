@@ -1,4 +1,6 @@
 import { getSupabase } from "@/lib/supabase";
+import { logServerEvent } from "@/lib/server-log";
+import { getCurrentUserId } from "@/lib/current-user";
 
 export type MemoryContext = {
   facts: Record<string, unknown>[];
@@ -37,6 +39,7 @@ async function safeSelect(table: "facts" | "entities" | "tasks") {
   const { data, error } = await supabase
     .from(table)
     .select("*")
+    .eq("user_id", getCurrentUserId())
     .order("created_at", { ascending: false })
     .limit(SEARCH_POOL_LIMIT);
 
@@ -54,6 +57,7 @@ async function safeSelectRecentMessages() {
     .from("messages")
     .select("role, content, created_at, metadata")
     .eq("role", "user")
+    .eq("user_id", getCurrentUserId())
     .order("created_at", { ascending: false })
     .limit(SEARCH_POOL_LIMIT);
   let data: Record<string, unknown>[] | null = initial.data;
@@ -64,6 +68,7 @@ async function safeSelectRecentMessages() {
       .from("messages")
       .select("role, content, created_at")
       .eq("role", "user")
+      .eq("user_id", getCurrentUserId())
       .order("created_at", { ascending: false })
       .limit(SEARCH_POOL_LIMIT);
     data = fallback.data as Record<string, unknown>[] | null;
@@ -100,6 +105,7 @@ async function searchHistoricalMessages(
   if (terms.length === 0) return [];
 
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const batches = await Promise.all(
     terms.flatMap((term) => {
       const pattern = `%${term}%`;
@@ -107,6 +113,7 @@ async function searchHistoricalMessages(
         supabase
           .from("messages")
           .select("id, role, content, created_at, conversation_id")
+          .eq("user_id", userId)
           .ilike("content", pattern)
           .order("created_at", { ascending: false })
           .limit(12)
@@ -117,6 +124,7 @@ async function searchHistoricalMessages(
           supabase
             .from("messages")
             .select("id, role, content, created_at, conversation_id")
+            .eq("user_id", userId)
             .eq("conversation_id", conversationId)
             .ilike("content", pattern)
             .order("created_at", { ascending: false })
@@ -187,11 +195,13 @@ export function resolveUserNameFromMemory(memory: MemoryContext) {
 
 export async function getStoredUserName() {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
 
   const [factsResult, entitiesResult, messagesResult] = await Promise.all([
     supabase
       .from("facts")
       .select("content, fact")
+      .eq("user_id", userId)
       .or(
         [
           "content.ilike.%имя пользователя%",
@@ -207,6 +217,7 @@ export async function getStoredUserName() {
     supabase
       .from("entities")
       .select("name, type, description")
+      .eq("user_id", userId)
       .or("type.ilike.%person%,type.ilike.%user%,description.ilike.%пользователь%")
       .order("created_at", { ascending: false })
       .limit(24),
@@ -214,6 +225,7 @@ export async function getStoredUserName() {
       .from("messages")
       .select("content")
       .eq("role", "user")
+      .eq("user_id", userId)
       .or(
         [
           "content.ilike.%меня зовут%",
@@ -259,6 +271,7 @@ async function searchFactsByTerms(terms: string[]) {
       const { data, error } = await supabase
         .from("facts")
         .select("*")
+        .eq("user_id", getCurrentUserId())
         .or(`content.ilike.${pattern},fact.ilike.${pattern}`)
         .order("created_at", { ascending: false })
         .limit(8);
@@ -285,6 +298,7 @@ async function searchEntitiesByTerms(terms: string[]) {
       const { data, error } = await supabase
         .from("entities")
         .select("*")
+        .eq("user_id", getCurrentUserId())
         .or(`name.ilike.${pattern},description.ilike.${pattern}`)
         .order("created_at", { ascending: false })
         .limit(8);
@@ -483,7 +497,12 @@ export async function saveMessage(
   conversationId?: string | number
 ) {
   const supabase = getSupabase();
-  const payload: Record<string, unknown> = { role, content, metadata };
+  const payload: Record<string, unknown> = {
+    role,
+    content,
+    metadata,
+    user_id: getCurrentUserId()
+  };
   if (conversationId && String(conversationId) !== "legacy") {
     payload.conversation_id = conversationId;
   }
@@ -496,10 +515,10 @@ export async function saveMessage(
       .select("id")
       .single();
 
-    if (error && /metadata|conversation_id/i.test(error.message)) {
+    if (error && /metadata|conversation_id|user_id/i.test(error.message)) {
       const fallback = await supabase
         .from("messages")
-        .insert({ role, content })
+        .insert({ role, content, user_id: getCurrentUserId() })
         .select("id")
         .single();
       data = fallback.data;
@@ -507,7 +526,13 @@ export async function saveMessage(
     }
 
     if (!error) {
-      return data?.id as string | number | undefined;
+      const messageId = data?.id as string | number | undefined;
+      logServerEvent("MESSAGE_INSERT", {
+        conversationId: conversationId ?? null,
+        messageId: messageId ?? null,
+        role
+      });
+      return messageId;
     }
 
     lastError = new Error(`Could not save ${role} message: ${error.message}`);
@@ -530,6 +555,7 @@ export async function patchMessageMetadata(
     .from("messages")
     .select("metadata")
     .eq("id", messageId)
+    .eq("user_id", getCurrentUserId())
     .maybeSingle();
 
   if (readError) {
@@ -544,7 +570,8 @@ export async function patchMessageMetadata(
   const { error } = await supabase
     .from("messages")
     .update({ metadata: { ...current, ...patch } })
-    .eq("id", messageId);
+    .eq("id", messageId)
+    .eq("user_id", getCurrentUserId());
 
   if (error) {
     throw new Error(`Could not update message metadata: ${error.message}`);
@@ -659,11 +686,13 @@ async function insertWithFallbacks(
   ...payloads: Record<string, unknown>[][]
 ) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   let lastError: string | undefined;
 
   for (const payload of payloads) {
     if (payload.length === 0) return;
-    const { error } = await supabase.from(table).insert(payload);
+    const scoped = payload.map((row) => ({ ...row, user_id: userId }));
+    const { error } = await supabase.from(table).insert(scoped);
     if (!error) return;
     lastError = error.message;
   }
@@ -678,6 +707,7 @@ async function filterNewFacts(facts: { content: string }[]) {
   const { data } = await supabase
     .from("facts")
     .select("*")
+    .eq("user_id", getCurrentUserId())
     .order("created_at", { ascending: false })
     .limit(SEARCH_POOL_LIMIT);
   const existing = new Set(
@@ -701,6 +731,7 @@ async function filterNewEntities(
   const { data } = await supabase
     .from("entities")
     .select("name, type")
+    .eq("user_id", getCurrentUserId())
     .order("created_at", { ascending: false })
     .limit(SEARCH_POOL_LIMIT);
   const existing = new Set(

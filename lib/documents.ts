@@ -6,6 +6,7 @@ import {
   spreadsheetFileTypeFromName
 } from "@/lib/spreadsheet-parse";
 import { getSupabase } from "@/lib/supabase";
+import { getCurrentUserId } from "@/lib/current-user";
 
 export type StoredDocument = {
   id: string | number;
@@ -35,9 +36,9 @@ export type StoredImageFile = {
   buffer: Buffer;
 };
 
-export function buildDocumentInlineUrl(documentId: string | number) {
-  return `/api/documents/${documentId}/download?inline=1`;
-}
+import { buildDocumentInlineUrl } from "@/lib/document-urls";
+
+export { buildDocumentInlineUrl };
 
 const DOCUMENTS_BUCKET = "documents";
 const MAX_EXTRACTED_TEXT = 80_000;
@@ -456,6 +457,7 @@ export async function processAndStoreFile(
     extracted_text: extractedText,
     summary,
     metadata,
+    user_id: getCurrentUserId(),
     ...(projectId ? { project_id: projectId } : {})
   };
 
@@ -534,7 +536,8 @@ export async function storeAudioFile(input: {
       metadata: {
         kind: "audio",
         has_transcript: Boolean(input.transcript)
-      }
+      },
+      user_id: getCurrentUserId()
     })
     .select("*")
     .single();
@@ -573,6 +576,7 @@ export async function getDocumentDownloadPayload(documentId: string | number) {
     .from("documents")
     .select("file_name, file_type, storage_path, metadata")
     .eq("id", documentId)
+    .eq("user_id", getCurrentUserId())
     .maybeSingle();
 
   if (error || !data) return null;
@@ -612,7 +616,8 @@ export async function getDocumentAttachments(ids: Array<string | number>) {
   const { data, error } = await supabase
     .from("documents")
     .select("id, file_name, file_type, file_size, storage_path, summary, metadata")
-    .in("id", ids);
+    .in("id", ids)
+    .eq("user_id", getCurrentUserId());
 
   if (error) {
     console.error("Document attachment retrieval failed:", error.message);
@@ -692,7 +697,8 @@ export async function getDocumentsForPrompt(ids: Array<string | number>) {
   const { data, error } = await supabase
     .from("documents")
     .select("id, file_name, file_type, extracted_text, summary, metadata")
-    .in("id", ids);
+    .in("id", ids)
+    .eq("user_id", getCurrentUserId());
 
   if (error) {
     console.error("Document retrieval failed:", error.message);
@@ -722,6 +728,7 @@ export async function searchDocumentsForPrompt(
     const { data, error } = await supabase
       .from("documents")
       .select("id, file_name, file_type, extracted_text, summary, metadata")
+      .eq("user_id", getCurrentUserId())
       .or(`file_name.ilike.${pattern},summary.ilike.${pattern},extracted_text.ilike.${pattern}`)
       .order("created_at", { ascending: false })
       .limit(limit * 2);
@@ -837,7 +844,8 @@ async function getImageFiles(ids: Array<string | number>): Promise<StoredImageFi
   const { data, error } = await supabase
     .from("documents")
     .select("file_name, file_type, storage_path, metadata")
-    .in("id", ids);
+    .in("id", ids)
+    .eq("user_id", getCurrentUserId());
 
   if (error) {
     console.error("Image document retrieval failed:", error.message);

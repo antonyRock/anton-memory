@@ -13,15 +13,11 @@ export type UserStats = {
   days: number;
 };
 
-export const DEFAULT_USER_ID = "00000000-0000-0000-0000-000000000001";
-
-export function getCurrentUserId() {
-  return process.env.DEFAULT_USER_ID?.trim() || DEFAULT_USER_ID;
-}
+export const DEFAULT_USER_ID = "f224756a-d4ae-4f09-a315-9991c03ebe84";
 
 export function getDefaultUserProfile(): UserProfile {
   return {
-    id: getCurrentUserId(),
+    id: process.env.DEFAULT_USER_ID?.trim() ?? DEFAULT_USER_ID,
     displayName: process.env.DEFAULT_USER_NAME?.trim() || "Антон",
     avatarUrl: null,
     tagline: "Ты можешь всё!"
@@ -34,7 +30,7 @@ export function countWordsInText(text: string) {
   return trimmed.split(/\s+/).filter(Boolean).length;
 }
 
-export async function getUserProfile(userId = getCurrentUserId()): Promise<UserProfile> {
+export async function getUserProfile(userId = DEFAULT_USER_ID): Promise<UserProfile> {
   const fallback = getDefaultUserProfile();
   const supabase = getSupabase();
 
@@ -150,7 +146,7 @@ async function getUserStatsFallback(userId: string): Promise<UserStats> {
   return { chats, words, days: dayKeys.size };
 }
 
-export async function getUserStats(userId = getCurrentUserId()): Promise<UserStats> {
+export async function getUserStats(userId = DEFAULT_USER_ID): Promise<UserStats> {
   try {
     const viaRpc = await getUserStatsViaRpc(userId);
     if (viaRpc) return viaRpc;

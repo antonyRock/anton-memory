@@ -8,6 +8,7 @@ import {
   savePendingVoiceRecording,
   type PendingVoiceRecording
 } from "@/lib/voice-recording-storage";
+import { logClientEvent } from "@/lib/client-log";
 import {
   MAX_AUDIO_BYTES,
   formatAudioSize,
@@ -24,6 +25,8 @@ import {
 
 type UseVoiceRecordingOptions = {
   disabled?: boolean;
+  authFetch?: typeof fetch;
+  getConversationId?: () => string | number | null | undefined;
   onNote: (message: string) => void;
   onTranscript: (text: string) => void;
   onTranscriptReady?: () => void;
@@ -31,6 +34,8 @@ type UseVoiceRecordingOptions = {
 
 export function useVoiceRecording({
   disabled = false,
+  authFetch = fetch,
+  getConversationId,
   onNote,
   onTranscript,
   onTranscriptReady
@@ -121,7 +126,7 @@ export function useVoiceRecording({
         const formData = new FormData();
         formData.append("audio", recording.blob, recording.fileName);
 
-        const response = await fetch("/api/transcribe", {
+        const response = await authFetch("/api/transcribe", {
           method: "POST",
           body: formData
         });
@@ -146,7 +151,13 @@ export function useVoiceRecording({
         await clearPendingVoiceRecording(recording.id);
         setPendingRecording(null);
         setTranscriptionError(null);
-        onTranscript(data.text.trim());
+        const transcript = data.text.trim();
+        logClientEvent("VOICE_TRANSCRIBE_SUCCESS", {
+          conversationId: getConversationId?.() ?? null,
+          recordingId: recording.id,
+          textLength: transcript.length
+        });
+        onTranscript(transcript);
         onTranscriptReady?.();
         onNote("Текст распознан — проверьте и отправьте");
       } catch (error) {
@@ -162,7 +173,7 @@ export function useVoiceRecording({
         }
       }
     },
-    [onNote, onTranscript, onTranscriptReady]
+    [authFetch, getConversationId, onNote, onTranscript, onTranscriptReady]
   );
 
   const persistAndTranscribe = useCallback(
@@ -177,6 +188,7 @@ export function useVoiceRecording({
       if (recording.sizeBytes > MAX_AUDIO_BYTES) {
         const message = recordingSizeLimitMessage(recording.sizeBytes);
         setTranscriptionError(message);
+        setIsTranscribing(false);
         onNote(message);
         return;
       }
@@ -187,6 +199,7 @@ export function useVoiceRecording({
   );
 
   const finalizeRecording = useCallback(async () => {
+    setIsTranscribing(true);
     const recorder = recorderRef.current;
     const mimeType = recorder?.mimeType || "audio/webm";
     const durationMs = Math.max(0, Date.now() - recordingStartedAtRef.current);
@@ -194,11 +207,16 @@ export function useVoiceRecording({
     chunksRef.current = [];
 
     if (blob.size === 0) {
+      setIsTranscribing(false);
       onNote("Пустая запись — попробуйте ещё раз");
       return;
     }
 
-    await persistAndTranscribe(blob, mimeType, durationMs);
+    try {
+      await persistAndTranscribe(blob, mimeType, durationMs);
+    } catch {
+      setIsTranscribing(false);
+    }
   }, [onNote, persistAndTranscribe]);
 
   const stopRecording = useCallback((action: "send" | "cancel") => {

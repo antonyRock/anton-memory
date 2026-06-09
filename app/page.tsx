@@ -13,10 +13,11 @@ import {
   type ReactNode
 } from "react";
 import { SearchResultsList } from "@/components/SearchResultsList";
-import { SidebarMoreMenu } from "@/components/SidebarMoreMenu";
 import { ComposerTextarea, type ComposerTextareaHandle } from "@/components/ComposerTextarea";
 import { VoiceRecordingPanel } from "@/components/VoiceRecordingPanel";
 import { MessageCopyButton } from "@/components/MessageCopyButton";
+import { MessageReplyButton } from "@/components/MessageReplyButton";
+import { ComposerReplyBanner } from "@/components/ComposerReplyBanner";
 import { PullToRefreshIndicator } from "@/components/PullToRefreshIndicator";
 import { SidebarUserProfile } from "@/components/SidebarUserProfile";
 import { ProjectFolderList } from "@/components/ProjectFolderList";
@@ -24,14 +25,17 @@ import { ChatFilesPanel } from "@/components/ChatFilesPanel";
 import { ChatContextMenu } from "@/components/ChatContextMenu";
 import { ProjectNavigator } from "@/components/ProjectNavigator";
 import { ObsidianBackground } from "@/components/ObsidianBackground";
+import { WelcomeRotatingText } from "@/components/WelcomeRotatingText";
 import {
   buildChatUrl,
   syncChatQueryParam
 } from "@/lib/chat-links";
+import { logClientEvent } from "@/lib/client-log";
 import { isConversationPinned, sortConversationsForSidebar } from "@/lib/chat-pins";
-import type { FileNavItem } from "@/lib/file-navigation";
+import type { FileNavItem } from "@/lib/file-nav-shared";
 import { isMobileViewport } from "@/lib/viewport";
 import { useVoiceRecording } from "@/hooks/useVoiceRecording";
+import { useAuthFetch } from "@/hooks/useAuthFetch";
 import { usePullToRefresh } from "@/hooks/usePullToRefresh";
 import { MOBILE_MEDIA_QUERY } from "@/lib/viewport";
 import {
@@ -82,6 +86,15 @@ type ChatMessage = {
   imageUrl?: string;
   metadata?: Record<string, unknown>;
   attachments?: FileAttachment[];
+  replyTo?: {
+    role: "user" | "assistant";
+    content: string;
+  };
+};
+
+type ReplyTarget = {
+  role: "user" | "assistant";
+  content: string;
 };
 
 type Conversation = {
@@ -116,13 +129,36 @@ type SearchResult = {
   matchText?: string;
 };
 
-type LibraryView = "files" | "images" | "settings" | null;
+type LibraryView = "settings" | null;
+type MessageSubmitSource = "form" | "enter";
 
 const DEFAULT_CHAT_TITLE = "Новый чат";
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 420;
 const DEFAULT_SIDEBAR_WIDTH = 280;
 const SCROLL_BOTTOM_THRESHOLD = 96;
+
+function readReplyFromMetadata(metadata?: Record<string, unknown>) {
+  const reply = metadata?.reply_to;
+  if (!reply || typeof reply !== "object" || Array.isArray(reply)) return undefined;
+  const role = (reply as { role?: string }).role;
+  const content = String((reply as { content?: string }).content ?? "").trim();
+  if ((role !== "user" && role !== "assistant") || !content) return undefined;
+  return { role, content };
+}
+
+function beginReplyToMessage(
+  message: ChatMessage,
+  focusComposer: () => void,
+  setReplyTo: (value: ReplyTarget | null) => void,
+  setNote: (value: string) => void
+) {
+  const content = message.content.trim();
+  if (!content) return;
+  setReplyTo({ role: message.role, content });
+  focusComposer();
+  setNote("Ответ на сообщение");
+}
 
 export default function Home() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -162,6 +198,8 @@ export default function Home() {
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [previewImage, setPreviewImage] = useState<FileAttachment | null>(null);
   const [note, setNote] = useState("Готово");
+  const [welcomeAnimationKey, setWelcomeAnimationKey] = useState(0);
+  const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
   const [isRenamingChat, setIsRenamingChat] = useState(false);
   const [renameChatValue, setRenameChatValue] = useState("");
   const [pullToRefreshEnabled, setPullToRefreshEnabled] = useState(false);
@@ -170,6 +208,10 @@ export default function Home() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerTextareaRef = useRef<ComposerTextareaHandle | null>(null);
   const chatRenameInputRef = useRef<HTMLInputElement | null>(null);
+  const submitInFlightRef = useRef(false);
+  const activeConversationIdRef = useRef<string | number | null>(null);
+  activeConversationIdRef.current = activeConversationId;
+  const { authFetch, authUrl } = useAuthFetch();
   const {
     isRecording,
     recordingDurationLabel,
@@ -184,6 +226,8 @@ export default function Home() {
     deletePendingRecording
   } = useVoiceRecording({
     disabled: isLoading,
+    authFetch,
+    getConversationId: () => activeConversationIdRef.current,
     onNote: setNote,
     onTranscript: (text) => {
       setInput((current) => (current.trim() ? `${current.trim()} ${text}` : text));
@@ -476,7 +520,7 @@ export default function Home() {
 
   async function loadProjects() {
     try {
-      const response = await fetch("/api/projects");
+      const response = await authFetch("/api/projects");
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить проекты");
       const loaded = (data.projects ?? []) as Project[];
@@ -507,7 +551,7 @@ export default function Home() {
     if (!title) return null;
 
     try {
-      const response = await fetch("/api/projects", {
+      const response = await authFetch("/api/projects", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title })
@@ -595,7 +639,7 @@ export default function Home() {
     }
 
     try {
-      const response = await fetch(`/api/projects/${projectId}`, {
+      const response = await authFetch(`/api/projects/${projectId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: trimmed })
@@ -623,7 +667,7 @@ export default function Home() {
     }
 
     try {
-      const response = await fetch(`/api/projects/${projectId}`, { method: "DELETE" });
+      const response = await authFetch(`/api/projects/${projectId}`, { method: "DELETE" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось удалить проект");
       setProjects((current) => current.filter((item) => String(item.id) !== String(projectId)));
@@ -670,7 +714,7 @@ export default function Home() {
     if (!trimmed || trimmed === currentTitle) return;
 
     try {
-      const response = await fetch(`/api/conversations/${activeConversationId}`, {
+      const response = await authFetch(`/api/conversations/${activeConversationId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: trimmed })
@@ -697,7 +741,7 @@ export default function Home() {
     const nextPinned = !isConversationPinned(activeConversation);
 
     try {
-      const response = await fetch(`/api/conversations/${activeConversationId}`, {
+      const response = await authFetch(`/api/conversations/${activeConversationId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ pinned: nextPinned })
@@ -724,7 +768,7 @@ export default function Home() {
     projectId: string | number | null
   ) {
     try {
-      const response = await fetch(`/api/conversations/${conversationId}`, {
+      const response = await authFetch(`/api/conversations/${conversationId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ projectId })
@@ -759,17 +803,6 @@ export default function Home() {
     setDropTargetProjectId(null);
   }
 
-  function toggleSidebar() {
-    if (!isMobileViewport()) return;
-
-    if (sidebarOpen) {
-      setSidebarOpen(false);
-    } else {
-      setSidebarCollapsed(false);
-      setSidebarOpen(true);
-    }
-  }
-
   function openSidebar() {
     setSidebarCollapsed(false);
     if (isMobileViewport()) {
@@ -791,7 +824,7 @@ export default function Home() {
 
   async function loadRecentConversations() {
     try {
-      const response = await fetch("/api/conversations?search=");
+      const response = await authFetch("/api/conversations?search=");
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить историю");
       setConversations(
@@ -814,7 +847,7 @@ export default function Home() {
     }
 
     try {
-      const response = await fetch(`/api/conversations?search=${encodeURIComponent(trimmed)}`);
+      const response = await authFetch(`/api/conversations?search=${encodeURIComponent(trimmed)}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error ?? "Не удалось выполнить поиск");
       setSearchResults(data.results ?? []);
@@ -839,7 +872,7 @@ export default function Home() {
     messagesAbortRef.current = controller;
 
     try {
-      const response = await fetch(`/api/conversations/${conversationId}/messages`, {
+      const response = await authFetch(`/api/conversations/${conversationId}/messages`, {
         signal: controller.signal
       });
       const data = await response.json();
@@ -859,7 +892,8 @@ export default function Home() {
             content: message.content,
             attachments: message.attachments ?? [],
             imageUrl: message.imageUrl ?? undefined,
-            metadata: message.metadata ?? undefined
+            metadata: message.metadata ?? undefined,
+            replyTo: readReplyFromMetadata(message.metadata)
           })
         )
       );
@@ -924,7 +958,9 @@ export default function Home() {
     setSearchResults([]);
     setSidebarOpen(false);
     setLibraryView(null);
+    setReplyTo(null);
     setNote(DEFAULT_CHAT_TITLE);
+    setWelcomeAnimationKey((current) => current + 1);
     window.localStorage.removeItem("activeConversationId");
     syncChatQueryParam(null);
   }
@@ -943,7 +979,7 @@ export default function Home() {
     try {
       const body =
         projectId != null && projectId !== "" ? { projectId } : {};
-      const response = await fetch("/api/conversations", {
+      const response = await authFetch("/api/conversations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
@@ -1089,7 +1125,7 @@ export default function Home() {
     }
 
     const inline = canOpenDocumentInline(attachment.fileName, attachment.fileType);
-    const url = buildDocumentDownloadUrl(attachment.id, inline);
+    const url = authUrl(buildDocumentDownloadUrl(attachment.id, inline));
 
     if (isMobileViewport()) {
       setNote(inline ? "Открываю файл..." : `Скачиваю ${attachment.fileName}...`);
@@ -1274,7 +1310,7 @@ export default function Home() {
   async function openSearchDocument(result: SearchResult) {
     const documentId = result.documentId ?? result.id;
     try {
-      const response = await fetch(`/api/documents/${documentId}`);
+      const response = await authFetch(`/api/documents/${documentId}`);
       const data = await response.json();
       if (response.ok && data.file) {
         await openFileAttachment({
@@ -1348,9 +1384,22 @@ export default function Home() {
     setNote("Остановлено");
   }
 
-  async function sendMessage(text: string, files = attachments) {
+  async function sendMessage(
+    text: string,
+    files = attachments,
+    source: MessageSubmitSource = "form"
+  ) {
     const trimmed = text.trim();
-    if ((!trimmed && files.length === 0) || isLoading) return;
+    if ((!trimmed && files.length === 0) || isLoading || submitInFlightRef.current) {
+      if (submitInFlightRef.current) {
+        logClientEvent("MESSAGE_SUBMIT_BLOCKED", {
+          reason: "in_flight",
+          source,
+          conversationId: activeConversationIdRef.current
+        });
+      }
+      return;
+    }
     if (files.some((file) => file.status === "uploading")) {
       setNote("Дождитесь загрузки файла");
       return;
@@ -1363,6 +1412,9 @@ export default function Home() {
       return;
     }
 
+    submitInFlightRef.current = true;
+    const submitId = crypto.randomUUID();
+
     let conversationId = activeConversationId;
     if (!conversationId) {
       const projectId =
@@ -1370,11 +1422,13 @@ export default function Home() {
       conversationId = await createConversation(projectId ?? undefined);
       if (conversationId) {
         setActiveConversationId(conversationId);
+        activeConversationIdRef.current = conversationId;
         window.localStorage.setItem("activeConversationId", String(conversationId));
         syncChatQueryParam(conversationId);
       }
     }
     if (!conversationId) {
+      submitInFlightRef.current = false;
       setNote("Не удалось создать чат. Проверьте подключение к Supabase.");
       return;
     }
@@ -1385,6 +1439,15 @@ export default function Home() {
     const hasImageAttachment = readyFiles.some((file) => file.fileType.startsWith("image/"));
     const imageIntent =
       shouldGenerateImage(trimmed) || (hasImageAttachment && shouldEditImage(trimmed));
+    const activeReply = replyTo;
+
+    logClientEvent("MESSAGE_SUBMIT", {
+      submitId,
+      source,
+      conversationId,
+      textLength: displayText.length,
+      replyToRole: activeReply?.role ?? null
+    });
 
     shouldAutoScrollRef.current = true;
     const clientRecentMessages = messages
@@ -1397,12 +1460,18 @@ export default function Home() {
 
     setMessages((current) => [
       ...current,
-      { role: "user", content: displayText, attachments: readyFiles },
+      {
+        role: "user",
+        content: displayText,
+        attachments: readyFiles,
+        replyTo: activeReply ?? undefined
+      },
       { role: "assistant", content: "" }
     ]);
     setStreamingAssistantText("");
     setInput("");
     setAttachments([]);
+    setReplyTo(null);
     setIsLoading(true);
     setActivityPhase(imageIntent ? "image" : "thinking");
     setNote(imageIntent ? "Создаю изображение… обычно до минуты" : "Готово");
@@ -1411,7 +1480,7 @@ export default function Home() {
     activeRequestRef.current = abortController;
 
     try {
-      const response = await fetch(imageIntent ? "/api/images" : "/api/chat", {
+      const response = await authFetch(imageIntent ? "/api/images" : "/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         signal: abortController.signal,
@@ -1422,7 +1491,8 @@ export default function Home() {
                 message: trimmed || "Посмотри прикреплённые файлы.",
                 documentIds: readyDocumentIds,
                 conversationId,
-                recentMessages: clientRecentMessages
+                recentMessages: clientRecentMessages,
+                replyTo: activeReply ?? undefined
               }
         )
       });
@@ -1490,6 +1560,7 @@ export default function Home() {
     } finally {
       activeRequestRef.current = null;
       streamReaderRef.current = null;
+      submitInFlightRef.current = false;
       setIsLoading(false);
       setStreamingAssistantText(null);
       setActivityPhase(null);
@@ -1543,13 +1614,18 @@ export default function Home() {
     }
   }
 
-  async function onSubmit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function handleComposerSubmit(source: MessageSubmitSource) {
     if (isRecording) {
       stopRecording("send");
       return;
     }
-    await sendMessage(input);
+    if (isTranscribing) return;
+    void sendMessage(input, attachments, source);
+  }
+
+  async function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    handleComposerSubmit("form");
   }
 
   async function onFilesSelected(fileList: FileList | null) {
@@ -1581,7 +1657,7 @@ export default function Home() {
     if (uploadProjectId) formData.append("projectId", String(uploadProjectId));
 
     try {
-      const response = await fetch("/api/files", {
+      const response = await authFetch("/api/files", {
         method: "POST",
         body: formData
       });
@@ -1661,19 +1737,6 @@ export default function Home() {
           </div>
         ) : null}
         <header className="top-bar">
-          <button
-            aria-expanded={sidebarOpen}
-            aria-label={sidebarOpen ? "Закрыть меню" : "Открыть меню"}
-            className="mobile-menu-button"
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              toggleSidebar();
-            }}
-            type="button"
-          >
-            {sidebarOpen ? <X size={20} /> : <PanelLeftOpen size={20} />}
-          </button>
           <div className="brand">
             <div className="brand-title">
               <strong>
@@ -1799,21 +1862,9 @@ export default function Home() {
               </div>
             </div>
           ) : null}
-          {!hasMessages && !showProjectView && (libraryView === "files" || libraryView === "images") ? (
+          {!hasMessages && !showProjectView && !libraryView ? (
             <div className="empty-state">
-              <div>
-                <h1>{libraryView === "files" ? "Файлы" : "Изображения"}</h1>
-                <p>Откройте проект или загрузите файл в чат, чтобы увидеть материалы здесь.</p>
-              </div>
-            </div>
-          ) : null}
-          {!hasMessages && !showProjectView && !libraryView && !activeConversationId ? (
-            <div className="empty-state">
-              <div>
-                <h1>
-                  Добро пожаловать в <span className="brand-accent">T</span>Brain
-                </h1>
-              </div>
+              <WelcomeRotatingText key={welcomeAnimationKey} />
             </div>
           ) : null}
           {hasMessages && !showProjectView ? (
@@ -1839,6 +1890,17 @@ export default function Home() {
               >
                 {message.role === "assistant" ? <div className="avatar avatar-assistant">T</div> : null}
                 <div className="bubble">
+                  {message.replyTo ? (
+                    <div className="message-reply-quote">
+                      <span className="message-reply-quote-label">
+                        {message.replyTo.role === "assistant" ? "TBrain" : "Вы"}
+                      </span>
+                      <p className="message-reply-quote-text">
+                        {message.replyTo.content.slice(0, 220)}
+                        {message.replyTo.content.length > 220 ? "…" : ""}
+                      </p>
+                    </div>
+                  ) : null}
                   {displayContent ? (
                     <div>
                       {renderHighlightedText(
@@ -1852,6 +1914,7 @@ export default function Home() {
                   {visibleAttachments.length ? (
                     <MessageAttachments
                       attachments={visibleAttachments}
+                      resolveAssetUrl={authUrl}
                       onOpen={(attachment) => void openFileAttachment(attachment)}
                       onPreview={setPreviewImage}
                     />
@@ -1868,7 +1931,32 @@ export default function Home() {
                   ) : null}
                   {message.role === "assistant" && displayContent && !isStreamingBubble ? (
                     <div className="message-actions">
+                      <MessageReplyButton
+                        onReply={() => {
+                          beginReplyToMessage(
+                            { ...message, content: displayContent },
+                            () => composerTextareaRef.current?.focus(),
+                            setReplyTo,
+                            setNote
+                          );
+                        }}
+                      />
                       <MessageCopyButton onNotify={setNote} text={displayContent} />
+                    </div>
+                  ) : null}
+                  {message.role === "user" && displayContent ? (
+                    <div className="message-actions message-actions-user">
+                      <MessageReplyButton
+                        label="Ответить на своё сообщение"
+                        onReply={() => {
+                          beginReplyToMessage(
+                            message,
+                            () => composerTextareaRef.current?.focus(),
+                            setReplyTo,
+                            setNote
+                          );
+                        }}
+                      />
                     </div>
                   ) : null}
                 </div>
@@ -1954,6 +2042,13 @@ export default function Home() {
               ))}
             </div>
           ) : null}
+          {replyTo ? (
+            <ComposerReplyBanner
+              content={replyTo.content}
+              onCancel={() => setReplyTo(null)}
+              role={replyTo.role}
+            />
+          ) : null}
           <form
             className={`composer ${isRecording ? "is-recording" : ""} ${
               isTranscribing ? "is-transcribing" : ""
@@ -1997,7 +2092,7 @@ export default function Home() {
               disabled={isLoading || isRecording || isTranscribing}
               onChange={setInput}
               onSubmit={() => {
-                void sendMessage(input);
+                handleComposerSubmit("enter");
               }}
               ref={composerTextareaRef}
               value={input}
@@ -2119,23 +2214,6 @@ export default function Home() {
                 </button>
               ) : null}
             </label>
-
-            <SidebarMoreMenu
-              onFiles={() => {
-                setLibraryView("files");
-                resetToNewChat();
-                closeSidebarIfMobile();
-              }}
-              onImages={() => {
-                setLibraryView("images");
-                resetToNewChat();
-                closeSidebarIfMobile();
-              }}
-              onSettings={() => {
-                setLibraryView("settings");
-                closeSidebarIfMobile();
-              }}
-            />
           </div>
 
           <div aria-hidden="true" className="sidebar-divider" />
@@ -2327,12 +2405,12 @@ export default function Home() {
             </button>
             {previewImage.fullUrl || previewImage.previewUrl ? (
               <img
-                src={previewImage.fullUrl ?? previewImage.previewUrl ?? ""}
+                src={authUrl(previewImage.fullUrl ?? previewImage.previewUrl ?? "")}
                 alt={previewImage.fileName}
               />
             ) : previewImage.id != null ? (
               <img
-                src={buildDocumentDownloadUrl(previewImage.id, true)}
+                src={authUrl(buildDocumentDownloadUrl(previewImage.id, true))}
                 alt={previewImage.fileName}
               />
             ) : null}
@@ -2549,13 +2627,16 @@ async function downloadDocumentViaBlob(url: string, fileName: string, inline: bo
 
 function MessageAttachments({
   attachments,
+  resolveAssetUrl,
   onOpen,
   onPreview
 }: {
   attachments: FileAttachment[];
+  resolveAssetUrl?: (url: string) => string;
   onOpen: (attachment: FileAttachment) => void;
   onPreview: (attachment: FileAttachment) => void;
 }) {
+  const assetUrl = resolveAssetUrl ?? ((url: string) => url);
   return (
     <div className="message-attachments">
       {attachments.map((attachment) =>
@@ -2566,7 +2647,7 @@ function MessageAttachments({
             onClick={() => onPreview(attachment)}
             type="button"
           >
-            <img src={attachment.previewUrl} alt={attachment.fileName} />
+            <img src={assetUrl(attachment.previewUrl)} alt={attachment.fileName} />
             <span>{attachment.fileName}</span>
           </button>
         ) : (

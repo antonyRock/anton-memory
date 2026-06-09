@@ -7,6 +7,7 @@ import {
 } from "@/lib/documents";
 import { createImageThumbnailBase64 } from "@/lib/image-thumbnail";
 import { getSupabase } from "@/lib/supabase";
+import { getCurrentUserId } from "@/lib/current-user";
 
 const MAX_GENERATED_IMAGE_INLINE_BYTES = 3 * 1024 * 1024;
 
@@ -73,7 +74,8 @@ export async function createGeneratedImageDocument(input: {
       storage_path: null,
       extracted_text: summary,
       summary,
-      metadata
+      metadata,
+      user_id: getCurrentUserId()
     })
     .select("*")
     .single();

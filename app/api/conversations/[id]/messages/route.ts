@@ -1,19 +1,16 @@
 import { NextResponse } from "next/server";
 import { getConversationMessages } from "@/lib/conversations";
+import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
-  try {
+  return handleAuthenticatedRoute(request, async () => {
     const { id } = await context.params;
     const messages = await getConversationMessages(id);
     return NextResponse.json({ messages });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unexpected messages load error.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  });
 }

@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { MAX_AUDIO_BYTES, formatAudioSize } from "@/lib/voice-recording";
 import { transcribeAudio } from "@/lib/transcription";
+import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 export async function POST(request: Request) {
-  try {
+  return handleAuthenticatedRoute(request, async () => {
     const formData = await request.formData();
     const audio = formData.get("audio");
 
@@ -35,16 +36,5 @@ export async function POST(request: Request) {
 
     const text = await transcribeAudio(audio);
     return NextResponse.json({ text });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Не удалось распознать аудио.";
-
-    const status = message.toLowerCase().includes("сеть")
-      ? 503
-      : message.toLowerCase().includes("слишком большой")
-        ? 413
-        : 500;
-
-    return NextResponse.json({ error: message }, { status });
-  }
+  });
 }

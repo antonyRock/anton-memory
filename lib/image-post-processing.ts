@@ -3,8 +3,10 @@ import { touchConversation } from "@/lib/conversations";
 import { linkDocumentsToMessage } from "@/lib/documents";
 import { persistGeneratedImageBytes } from "@/lib/generated-image-storage";
 import { patchMessageMetadata } from "@/lib/memory";
+import { runWithRequestUser } from "@/lib/request-context";
 
 type ImagePostProcessingInput = {
+  userId: string;
   conversationId?: string | number;
   assistantMessageId: string | number;
   documentId: string | number;
@@ -13,6 +15,7 @@ type ImagePostProcessingInput = {
 
 export function scheduleImageStorage(input: ImagePostProcessingInput) {
   const task = async () => {
+    await runWithRequestUser(input.userId, async () => {
     const startedAt = performance.now();
     console.log(
       `[tBrain background] image storage started conversation=${input.conversationId ?? "unknown"} document=${input.documentId}`
@@ -46,6 +49,7 @@ export function scheduleImageStorage(input: ImagePostProcessingInput) {
         `[tBrain background] image storage failed: ${message} conversation=${input.conversationId ?? "unknown"} document=${input.documentId}`
       );
     }
+    });
   };
 
   try {

@@ -7,5 +7,6 @@ out
 *.tsbuildinfo
 dist
 work/
+.data/
 
 .vercel

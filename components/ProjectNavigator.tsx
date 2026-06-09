@@ -3,7 +3,8 @@
 import { ArrowLeft, Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 import { FileBrowserPanel } from "@/components/FileBrowserPanel";
-import type { FileNavGroup, FileNavItem } from "@/lib/file-navigation";
+import { useAuthFetch } from "@/hooks/useAuthFetch";
+import type { FileNavGroup, FileNavItem } from "@/lib/file-nav-shared";
 
 type ProjectTab = "chats" | "files" | "images";
 
@@ -26,6 +27,7 @@ export function ProjectNavigator({
   onOpenConversation,
   onOpenFile
 }: ProjectNavigatorProps) {
+  const { authFetch } = useAuthFetch();
   const [tab, setTab] = useState<ProjectTab>("chats");
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
@@ -42,7 +44,7 @@ export function ProjectNavigator({
           kind: tab === "images" ? "images" : "files",
           search
         });
-        const response = await fetch(`/api/projects/${projectId}/files?${params.toString()}`);
+        const response = await authFetch(`/api/projects/${projectId}/files?${params.toString()}`);
         const data = await response.json();
         if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить файлы проекта");
         setFiles(data.files ?? []);
@@ -56,7 +58,7 @@ export function ProjectNavigator({
     }, 200);
 
     return () => window.clearTimeout(handle);
-  }, [projectId, search, tab]);
+  }, [authFetch, projectId, search, tab]);
 
   return (
     <div className="project-navigator">

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { updateConversationPinned, updateConversationTitle } from "@/lib/conversations";
 import { assignConversationToProject } from "@/lib/projects";
+import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 
@@ -9,7 +10,7 @@ type RouteContext = {
 };
 
 export async function PATCH(request: Request, context: RouteContext) {
-  try {
+  return handleAuthenticatedRoute(request, async () => {
     const { id } = await context.params;
     const body = await request.json();
 
@@ -32,9 +33,5 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
 
     return NextResponse.json({ error: "title, pinned, or projectId is required." }, { status: 400 });
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Unexpected conversation update error.";
-    return NextResponse.json({ error: message }, { status: 500 });
-  }
+  });
 }

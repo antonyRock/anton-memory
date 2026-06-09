@@ -1,22 +1,13 @@
-import { buildDocumentInlineUrl, getDocumentAttachments, type DocumentAttachment } from "@/lib/documents";
+import "server-only";
+
+import { getDocumentAttachments, type DocumentAttachment } from "@/lib/documents";
 import { isImageDocument } from "@/lib/projects";
 import { getSupabase } from "@/lib/supabase";
+import { getCurrentUserId } from "@/lib/current-user";
+import type { FileNavGroup, FileNavItem } from "@/lib/file-nav-shared";
 
-export type FileNavItem = DocumentAttachment & {
-  createdAt: string;
-  conversationId: string | number | null;
-  conversationTitle: string | null;
-  messageId: string | number | null;
-  isImage: boolean;
-  isGeneratedImage: boolean;
-  extractedText?: string;
-};
-
-export type FileNavGroup = {
-  conversationId: string | number;
-  conversationTitle: string;
-  files: FileNavItem[];
-};
+export type { FileNavGroup, FileNavItem } from "@/lib/file-nav-shared";
+export { resolveFileNavPreviewUrl } from "@/lib/file-nav-shared";
 
 type FileKind = "files" | "images" | "all";
 
@@ -48,11 +39,6 @@ function sortFiles(files: FileNavItem[]) {
   return [...files].sort(
     (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
   );
-}
-
-export function resolveFileNavPreviewUrl(file: Pick<FileNavItem, "id" | "previewUrl" | "fullUrl" | "isImage">) {
-  if (!file.isImage) return null;
-  return file.previewUrl ?? file.fullUrl ?? buildDocumentInlineUrl(file.id);
 }
 
 async function collectDocumentSourcesForMessages(
@@ -150,13 +136,20 @@ export async function listConversationDocuments(
   options: ListOptions = {}
 ) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const kind = options.kind ?? "all";
 
   const [{ data: conversation }, { data: messages }] = await Promise.all([
-    supabase.from("conversations").select("id, title").eq("id", conversationId).maybeSingle(),
+    supabase
+      .from("conversations")
+      .select("id, title")
+      .eq("id", conversationId)
+      .eq("user_id", userId)
+      .maybeSingle(),
     supabase
       .from("messages")
       .select("id, conversation_id, metadata")
+      .eq("user_id", userId)
       .eq("conversation_id", conversationId)
       .order("created_at", { ascending: false })
       .limit(500)
@@ -177,6 +170,7 @@ export async function listConversationDocuments(
   const { data: documentRows } = await supabase
     .from("documents")
     .select("id, file_name, file_type, file_size, storage_path, summary, extracted_text, metadata, created_at")
+    .eq("user_id", userId)
     .in(
       "id",
       documentIds.map((id) => Number(id))
@@ -201,13 +195,15 @@ export async function listConversationDocuments(
 
 export async function listProjectDocuments(projectId: string | number, options: ListOptions = {}) {
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const kind = options.kind ?? "all";
 
   const [{ data: project }, { data: conversations }] = await Promise.all([
-    supabase.from("projects").select("id, title").eq("id", projectId).single(),
+    supabase.from("projects").select("id, title").eq("id", projectId).eq("user_id", userId).single(),
     supabase
       .from("conversations")
       .select("id, title")
+      .eq("user_id", userId)
       .eq("project_id", projectId)
       .order("updated_at", { ascending: false })
       .limit(100)
@@ -227,6 +223,7 @@ export async function listProjectDocuments(projectId: string | number, options: 
     const { data: messages } = await supabase
       .from("messages")
       .select("id, conversation_id, metadata")
+      .eq("user_id", userId)
       .in("conversation_id", conversationIds)
       .order("created_at", { ascending: false })
       .limit(2000);
@@ -237,6 +234,7 @@ export async function listProjectDocuments(projectId: string | number, options: 
   const { data: projectDocuments } = await supabase
     .from("documents")
     .select("id, file_name, file_type, file_size, storage_path, summary, extracted_text, metadata, created_at")
+    .eq("user_id", userId)
     .eq("project_id", projectId)
     .order("created_at", { ascending: false })
     .limit(300);
@@ -262,6 +260,7 @@ export async function listProjectDocuments(projectId: string | number, options: 
   const { data: linkedDocuments } = await supabase
     .from("documents")
     .select("id, file_name, file_type, file_size, storage_path, summary, extracted_text, metadata, created_at")
+    .eq("user_id", userId)
     .in(
       "id",
       documentIds.map((id) => Number(id))

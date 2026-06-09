@@ -11,11 +11,14 @@ import { scheduleImageStorage } from "@/lib/image-post-processing";
 import { getOpenAI, getImageModelOptions, imageModel } from "@/lib/openai";
 import { patchMessageMetadata, saveMessage } from "@/lib/memory";
 import { createRequestProfiler } from "@/lib/request-profile";
+import { getCurrentUserId } from "@/lib/current-user";
+import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
 export async function POST(request: Request) {
+  return handleAuthenticatedRoute(request, async () => {
   const profiler = createRequestProfiler();
 
   try {
@@ -133,6 +136,7 @@ export async function POST(request: Request) {
         );
 
         scheduleImageStorage({
+          userId: getCurrentUserId(),
           conversationId,
           assistantMessageId,
           documentId: document.id,
@@ -161,6 +165,7 @@ export async function POST(request: Request) {
       error instanceof Error ? error.message : "Unexpected image generation error.";
     return NextResponse.json({ error: message }, { status: 500 });
   }
+  });
 }
 
 async function toUploadable(image: {

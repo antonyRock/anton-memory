@@ -2,6 +2,7 @@ import { chatModel, getOpenAI } from "@/lib/openai";
 import { getSupabase } from "@/lib/supabase";
 import type { RawCell } from "@/lib/spreadsheet-parse";
 import { saveExtractedMemory, type MemoryExtraction } from "@/lib/memory";
+import { getCurrentUserId } from "@/lib/current-user";
 
 type DocumentMemoryInput = {
   id: string | number;
@@ -154,13 +155,29 @@ export async function getDocumentLinkedMemoryForPrompt(
   if (documentIds.length === 0 && !query.trim()) return "";
 
   const supabase = getSupabase();
+  const userId = getCurrentUserId();
   const idSet = new Set(documentIds.map(String));
   const sections: string[] = [];
 
   const [factsResult, entitiesResult, tasksResult] = await Promise.all([
-    supabase.from("facts").select("content, fact, metadata").order("created_at", { ascending: false }).limit(300),
-    supabase.from("entities").select("name, type, description, metadata").order("created_at", { ascending: false }).limit(200),
-    supabase.from("tasks").select("title, status, description, metadata").order("created_at", { ascending: false }).limit(100)
+    supabase
+      .from("facts")
+      .select("content, fact, metadata")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(300),
+    supabase
+      .from("entities")
+      .select("name, type, description, metadata")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(200),
+    supabase
+      .from("tasks")
+      .select("title, status, description, metadata")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(100)
   ]);
 
   const queryLower = query.toLowerCase();
@@ -253,6 +270,7 @@ export async function searchDocumentIdsByQuery(query: string, limit = 5) {
     const { data } = await supabase
       .from("documents")
       .select("id")
+      .eq("user_id", getCurrentUserId())
       .or(`file_name.ilike.${pattern},summary.ilike.${pattern},extracted_text.ilike.${pattern}`)
       .order("created_at", { ascending: false })
       .limit(limit * 2);
