@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
-import { storeAudioFile } from "@/lib/documents";
+import { MAX_AUDIO_BYTES, formatAudioSize } from "@/lib/voice-recording";
 import { transcribeAudio } from "@/lib/transcription";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 export async function POST(request: Request) {
   try {
@@ -12,17 +12,39 @@ export async function POST(request: Request) {
 
     if (!(audio instanceof File)) {
       return NextResponse.json(
-        { error: "Audio file is required." },
+        { error: "Нужен аудиофайл в поле audio." },
         { status: 400 }
       );
     }
 
+    if (audio.size === 0) {
+      return NextResponse.json(
+        { error: "Пустой аудиофайл. Запишите сообщение ещё раз." },
+        { status: 400 }
+      );
+    }
+
+    if (audio.size > MAX_AUDIO_BYTES) {
+      return NextResponse.json(
+        {
+          error: `Файл слишком большой (${formatAudioSize(audio.size)}). Максимум ${formatAudioSize(MAX_AUDIO_BYTES)}.`
+        },
+        { status: 413 }
+      );
+    }
+
     const text = await transcribeAudio(audio);
-    const document = await storeAudioFile({ file: audio, transcript: text });
-    return NextResponse.json({ text, documentId: document.id });
+    return NextResponse.json({ text });
   } catch (error) {
     const message =
-      error instanceof Error ? error.message : "Unexpected transcription error.";
-    return NextResponse.json({ error: message }, { status: 500 });
+      error instanceof Error ? error.message : "Не удалось распознать аудио.";
+
+    const status = message.toLowerCase().includes("сеть")
+      ? 503
+      : message.toLowerCase().includes("слишком большой")
+        ? 413
+        : 500;
+
+    return NextResponse.json({ error: message }, { status });
   }
 }

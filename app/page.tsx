@@ -13,7 +13,8 @@ import {
 } from "react";
 import { SearchResultsList } from "@/components/SearchResultsList";
 import { SidebarMoreMenu } from "@/components/SidebarMoreMenu";
-import { ComposerTextarea } from "@/components/ComposerTextarea";
+import { ComposerTextarea, type ComposerTextareaHandle } from "@/components/ComposerTextarea";
+import { VoiceRecordingPanel } from "@/components/VoiceRecordingPanel";
 import { SidebarUserProfile } from "@/components/SidebarUserProfile";
 import { ProjectFolderList } from "@/components/ProjectFolderList";
 import { ChatFilesPanel } from "@/components/ChatFilesPanel";
@@ -27,6 +28,7 @@ import {
 import { isConversationPinned, sortConversationsForSidebar } from "@/lib/chat-pins";
 import type { FileNavItem } from "@/lib/file-navigation";
 import { isMobileViewport } from "@/lib/viewport";
+import { useVoiceRecording } from "@/hooks/useVoiceRecording";
 import {
   ThinkingIndicator,
   type ThinkingPhase
@@ -150,22 +152,38 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
-  const [isTranscribing, setIsTranscribing] = useState(false);
   const [activityPhase, setActivityPhase] = useState<ThinkingPhase | null>(null);
   const [streamingAssistantText, setStreamingAssistantText] = useState<string | null>(null);
-  const [isRecording, setIsRecording] = useState(false);
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [previewImage, setPreviewImage] = useState<FileAttachment | null>(null);
   const [note, setNote] = useState("Готово");
   const [isRenamingChat, setIsRenamingChat] = useState(false);
   const [renameChatValue, setRenameChatValue] = useState("");
-  const recorderRef = useRef<MediaRecorder | null>(null);
   const activeRequestRef = useRef<AbortController | null>(null);
   const streamReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
-  const chunksRef = useRef<BlobPart[]>([]);
-  const recordingActionRef = useRef<"send" | "cancel">("send");
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const composerTextareaRef = useRef<ComposerTextareaHandle | null>(null);
   const chatRenameInputRef = useRef<HTMLInputElement | null>(null);
+  const {
+    isRecording,
+    recordingDurationLabel,
+    isTranscribing,
+    pendingRecording,
+    transcriptionError,
+    startRecording,
+    stopRecording,
+    retryTranscription,
+    deletePendingRecording
+  } = useVoiceRecording({
+    disabled: isLoading,
+    onNote: setNote,
+    onTranscript: (text) => {
+      setInput((current) => (current.trim() ? `${current.trim()} ${text}` : text));
+    },
+    onTranscriptReady: () => {
+      composerTextareaRef.current?.focus();
+    }
+  });
   const messagesRef = useRef<HTMLElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
@@ -276,6 +294,13 @@ export default function Home() {
     setIsRenamingChat(false);
     setRenameChatValue("");
   }, [activeConversationId]);
+
+  useEffect(() => {
+    setActivityPhase((current) => {
+      if (isTranscribing) return "transcription";
+      return current === "transcription" ? null : current;
+    });
+  }, [isTranscribing]);
 
   useEffect(() => {
     if (activeConversationId == null) return;
@@ -1475,93 +1500,6 @@ export default function Home() {
     await sendMessage(input);
   }
 
-  function stopRecording(action: "send" | "cancel") {
-    recordingActionRef.current = action;
-    recorderRef.current?.stop();
-  }
-
-  async function startRecording() {
-    if (isRecording) {
-      stopRecording("cancel");
-      return;
-    }
-
-    if (!window.isSecureContext) {
-      setNote(
-        "Микрофон с iPhone по HTTP (192.168…) недоступен. Используй HTTPS или tbrain.vercel.app."
-      );
-      return;
-    }
-
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
-      chunksRef.current = [];
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size > 0) chunksRef.current.push(event.data);
-      };
-
-      recorder.onstop = async () => {
-        stream.getTracks().forEach((track) => track.stop());
-        setIsRecording(false);
-
-        if (recordingActionRef.current === "cancel") {
-          chunksRef.current = [];
-          setNote("Запись отменена");
-          return;
-        }
-
-        setIsTranscribing(true);
-        setActivityPhase("transcription");
-
-        const blob = new Blob(chunksRef.current, {
-          type: recorder.mimeType || "audio/webm"
-        });
-        const formData = new FormData();
-        formData.append("audio", blob, "voice.webm");
-
-        try {
-          const response = await fetch("/api/transcribe", {
-            method: "POST",
-            body: formData
-          });
-          const data = await response.json();
-          if (!response.ok) throw new Error(data.error ?? "Не удалось распознать аудио");
-          await sendMessage(data.text, [
-            {
-              id: data.documentId,
-              fileName: "voice.webm",
-              fileType: "audio/webm",
-              fileSize: blob.size,
-              status: "ready"
-            }
-          ]);
-        } catch (error) {
-          setNote(
-            error instanceof Error
-              ? `Ошибка распознавания: ${error.message}`
-              : "Ошибка распознавания"
-          );
-        } finally {
-          setIsTranscribing(false);
-        }
-      };
-
-      recorderRef.current = recorder;
-      recordingActionRef.current = "send";
-      recorder.start();
-      setIsRecording(true);
-      setNote("Идёт запись");
-    } catch (error) {
-      setNote(
-        error instanceof Error
-          ? `Микрофон: ${error.message}`
-          : "Браузер не дал доступ к микрофону"
-      );
-    }
-  }
-
   async function onFilesSelected(fileList: FileList | null) {
     if (!fileList?.length) return;
     const selectedFiles = Array.from(fileList);
@@ -1916,18 +1854,19 @@ export default function Home() {
               phase={activityPhase}
             />
           ) : null}
-          {isRecording ? (
-            <div className="recording-pill">
-              <span className="recording-dot" />
-              <span>Идёт запись</span>
-              <div className="recording-bars" aria-hidden="true">
-                <span />
-                <span />
-                <span />
-                <span />
-              </div>
-            </div>
-          ) : null}
+          <VoiceRecordingPanel
+            isRecording={isRecording}
+            isTranscribing={isTranscribing}
+            onDelete={() => {
+              void deletePendingRecording();
+            }}
+            onRetry={() => {
+              void retryTranscription();
+            }}
+            pendingRecording={pendingRecording}
+            recordingDurationLabel={recordingDurationLabel}
+            transcriptionError={transcriptionError}
+          />
           {attachments.length > 0 ? (
             <div className="attachments" aria-live="polite">
               {attachments.map((attachment, index) => (
@@ -1946,7 +1885,7 @@ export default function Home() {
           <form className="composer" onSubmit={onSubmit}>
             <input
               accept=".pdf,.docx,.txt,.md,.csv,.json,.xlsx,.xls,.png,.jpg,.jpeg,.webp"
-              disabled={isLoading || isRecording}
+              disabled={isLoading || isRecording || isTranscribing}
               id="composer-file-input"
               ref={fileInputRef}
               className="file-input"
@@ -1978,19 +1917,22 @@ export default function Home() {
             <button
               aria-label={isRecording ? "Запись идёт" : "Начать запись"}
               className={`icon-button composer-tool ${isRecording ? "recording" : ""}`}
-              disabled={isLoading || isRecording}
-              onClick={startRecording}
+              disabled={isLoading || isRecording || isTranscribing}
+              onClick={() => {
+                void startRecording();
+              }}
               title={isRecording ? "Запись идёт" : "Микрофон"}
               type="button"
             >
               <Mic size={20} />
             </button>
             <ComposerTextarea
-              disabled={isLoading || isRecording}
+              disabled={isLoading || isRecording || isTranscribing}
               onChange={setInput}
               onSubmit={() => {
                 void sendMessage(input);
               }}
+              ref={composerTextareaRef}
               value={input}
             />
             <button
