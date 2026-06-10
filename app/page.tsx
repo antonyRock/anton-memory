@@ -36,6 +36,7 @@ import type { FileNavItem } from "@/lib/file-nav-shared";
 import { renderMessageContent } from "@/lib/message-text";
 import { isMobileViewport } from "@/lib/viewport";
 import { useVoiceRecording } from "@/hooks/useVoiceRecording";
+import type { VoiceTranscriptMeta } from "@/lib/transcription";
 import { useAuthFetch } from "@/hooks/useAuthFetch";
 import { usePullToRefresh } from "@/hooks/usePullToRefresh";
 import { MOBILE_MEDIA_QUERY } from "@/lib/viewport";
@@ -64,6 +65,7 @@ import {
   Send,
   Square,
   X,
+  TextCursorInput,
   Zap
 } from "lucide-react";
 
@@ -134,6 +136,7 @@ type LibraryView = "settings" | null;
 type MessageSubmitSource = "form" | "enter" | "voice";
 
 const DEFAULT_CHAT_TITLE = "Новый чат";
+const VOICE_REVIEW_PREF_KEY = "reviewVoiceBeforeSend";
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 420;
 const DEFAULT_SIDEBAR_WIDTH = 280;
@@ -192,7 +195,11 @@ export default function Home() {
   const [highlightTerm, setHighlightTerm] = useState("");
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const [input, setInput] = useState("");
+  const [reviewVoiceBeforeSend, setReviewVoiceBeforeSend] = useState(false);
+  const pendingVoiceTranscriptRef = useRef<VoiceTranscriptMeta | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [historyLoadError, setHistoryLoadError] = useState<string | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [activityPhase, setActivityPhase] = useState<ThinkingPhase | null>(null);
   const [streamingAssistantText, setStreamingAssistantText] = useState<string | null>(null);
@@ -230,9 +237,16 @@ export default function Home() {
     authFetch,
     getConversationId: () => activeConversationIdRef.current,
     onNote: setNote,
-    onTranscriptReady: (text) => {
+    onTranscriptReady: (text, meta) => {
+      if (reviewVoiceBeforeSend) {
+        setInput((current) => (current.trim() ? `${current.trim()} ${text}` : text));
+        if (meta) pendingVoiceTranscriptRef.current = meta;
+        setNote("Проверьте текст и отправьте");
+        window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
+        return;
+      }
       const combined = input.trim() ? `${input.trim()} ${text}` : text;
-      void sendMessage(combined, attachments, "voice");
+      void sendMessage(combined, attachments, "voice", meta);
     }
   });
   const messagesRef = useRef<HTMLElement | null>(null);
@@ -242,6 +256,9 @@ export default function Home() {
   const stickToBottomConversationRef = useRef<string | null>(null);
   const stickToBottomTimerRef = useRef<number | null>(null);
   const resizingSidebarRef = useRef(false);
+  const hasComposerContent = input.trim().length > 0 || attachments.length > 0;
+  const showComposerSendButton = isLoading || isRecording || hasComposerContent;
+  const showComposerMicButton = !isRecording && !isLoading;
   const hasMessages = messages.length > 0;
   const pinComposerToBottom = true;
   const isUploadingFiles = attachments.some((file) => file.status === "uploading");
@@ -324,9 +341,17 @@ export default function Home() {
       setSidebarWidth(clampSidebarWidth(savedWidth));
     }
 
+    setReviewVoiceBeforeSend(window.localStorage.getItem(VOICE_REVIEW_PREF_KEY) === "true");
+
     prefsHydratedRef.current = true;
     void bootstrap();
   }, []);
+
+  useEffect(() => {
+    if (!input.trim()) {
+      pendingVoiceTranscriptRef.current = null;
+    }
+  }, [input]);
 
   useEffect(() => {
     if (!bootstrappedRef.current) return;
@@ -509,12 +534,12 @@ export default function Home() {
   async function bootstrap() {
     bootstrappedRef.current = true;
     const chatFromUrl = new URLSearchParams(window.location.search).get("chat");
-    await Promise.all([loadRecentConversations(), loadProjects()]);
     if (chatFromUrl) {
       openConversation(chatFromUrl);
-      return;
+    } else {
+      resetToNewChat();
     }
-    resetToNewChat();
+    void Promise.all([loadRecentConversations(), loadProjects()]);
   }
 
   async function loadProjects() {
@@ -873,6 +898,7 @@ export default function Home() {
     messagesAbortRef.current?.abort();
     messagesAbortRef.current = null;
     loadMessagesSeqRef.current += 1;
+    setIsLoadingHistory(false);
   }
 
   async function loadMessages(conversationId: string | number) {
@@ -880,44 +906,73 @@ export default function Home() {
     const requestSeq = loadMessagesSeqRef.current;
     const controller = new AbortController();
     messagesAbortRef.current = controller;
+    setIsLoadingHistory(true);
+    setHistoryLoadError(null);
+
+    const maxAttempts = 2;
 
     try {
-      const response = await authFetch(`/api/conversations/${conversationId}/messages`, {
-        signal: controller.signal
-      });
-      const data = await response.json();
-      if (requestSeq !== loadMessagesSeqRef.current) return;
-      if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить сообщения");
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        if (requestSeq !== loadMessagesSeqRef.current) return;
 
-      setMessages(
-        (data.messages ?? []).map(
-          (message: {
-            role: "user" | "assistant";
-            content: string;
-            attachments?: FileAttachment[];
-            imageUrl?: string | null;
-            metadata?: Record<string, unknown>;
-          }) => ({
-            role: message.role,
-            content: message.content,
-            attachments: message.attachments ?? [],
-            imageUrl: message.imageUrl ?? undefined,
-            metadata: message.metadata ?? undefined,
-            replyTo: readReplyFromMetadata(message.metadata)
-          })
-        )
-      );
-      shouldAutoScrollRef.current = true;
-      beginStickToBottom(conversationId);
-      window.localStorage.setItem("activeConversationId", String(conversationId));
-      setSidebarOpen(false);
-    } catch (error) {
-      if (requestSeq !== loadMessagesSeqRef.current) return;
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      setMessages([]);
-      setNote(error instanceof Error ? error.message : "Не удалось загрузить сообщения");
+        try {
+          const response = await authFetch(`/api/conversations/${conversationId}/messages`, {
+            signal: controller.signal
+          });
+          const data = await response.json();
+          if (requestSeq !== loadMessagesSeqRef.current) return;
+
+          if (!response.ok) {
+            const message = data.error ?? "Не удалось загрузить сообщения";
+            if (attempt + 1 < maxAttempts && response.status >= 500) {
+              await new Promise((resolve) => window.setTimeout(resolve, 800));
+              continue;
+            }
+            throw new Error(message);
+          }
+
+          setMessages(
+            (data.messages ?? []).map(
+              (message: {
+                role: "user" | "assistant";
+                content: string;
+                attachments?: FileAttachment[];
+                imageUrl?: string | null;
+                metadata?: Record<string, unknown>;
+              }) => ({
+                role: message.role,
+                content: message.content,
+                attachments: message.attachments ?? [],
+                imageUrl: message.imageUrl ?? undefined,
+                metadata: message.metadata ?? undefined,
+                replyTo: readReplyFromMetadata(message.metadata)
+              })
+            )
+          );
+          shouldAutoScrollRef.current = true;
+          beginStickToBottom(conversationId);
+          window.localStorage.setItem("activeConversationId", String(conversationId));
+          setSidebarOpen(false);
+          return;
+        } catch (error) {
+          if (requestSeq !== loadMessagesSeqRef.current) return;
+          if (error instanceof DOMException && error.name === "AbortError") return;
+          if (attempt + 1 < maxAttempts) {
+            await new Promise((resolve) => window.setTimeout(resolve, 800));
+            continue;
+          }
+          setMessages([]);
+          setHistoryLoadError(
+            error instanceof Error ? error.message : "Не удалось загрузить сообщения"
+          );
+          setNote(
+            error instanceof Error ? error.message : "Не удалось загрузить сообщения"
+          );
+        }
+      }
     } finally {
       if (requestSeq === loadMessagesSeqRef.current) {
+        setIsLoadingHistory(false);
         messagesAbortRef.current = null;
       }
     }
@@ -956,6 +1011,7 @@ export default function Home() {
 
   function resetToNewChat() {
     cancelPendingMessageLoad();
+    pendingVoiceTranscriptRef.current = null;
     pendingNewChatProjectIdRef.current = null;
     creatingChatRef.current = false;
     shouldAutoScrollRef.current = false;
@@ -970,9 +1026,20 @@ export default function Home() {
     setLibraryView(null);
     setReplyTo(null);
     setNote(DEFAULT_CHAT_TITLE);
+    setHistoryLoadError(null);
+    setIsLoadingHistory(false);
     setWelcomeAnimationKey((current) => current + 1);
     window.localStorage.removeItem("activeConversationId");
     syncChatQueryParam(null);
+  }
+
+  function toggleReviewVoiceBeforeSend() {
+    setReviewVoiceBeforeSend((current) => {
+      const next = !current;
+      window.localStorage.setItem(VOICE_REVIEW_PREF_KEY, String(next));
+      setNote(next ? "Голос будет вставляться для проверки" : "Голос отправляется сразу");
+      return next;
+    });
   }
 
   async function copyChatLink(conversationId: string | number) {
@@ -1397,7 +1464,8 @@ export default function Home() {
   async function sendMessage(
     text: string,
     files = attachments,
-    source: MessageSubmitSource = "form"
+    source: MessageSubmitSource = "form",
+    voiceTranscript?: VoiceTranscriptMeta
   ) {
     const trimmed = text.trim();
     if ((!trimmed && files.length === 0) || isLoading || submitInFlightRef.current) {
@@ -1425,6 +1493,11 @@ export default function Home() {
     submitInFlightRef.current = true;
     const submitId = crypto.randomUUID();
 
+    let resolvedVoiceTranscript = voiceTranscript;
+    if (!resolvedVoiceTranscript && pendingVoiceTranscriptRef.current) {
+      resolvedVoiceTranscript = pendingVoiceTranscriptRef.current;
+    }
+
     let conversationId = activeConversationId;
     if (!conversationId) {
       const projectId =
@@ -1441,6 +1514,10 @@ export default function Home() {
       submitInFlightRef.current = false;
       setNote("Не удалось создать чат. Проверьте подключение к Supabase.");
       return;
+    }
+
+    if (resolvedVoiceTranscript && !voiceTranscript) {
+      pendingVoiceTranscriptRef.current = null;
     }
 
     const readyFiles = files.filter((file) => file.status === "ready" && file.id);
@@ -1502,7 +1579,16 @@ export default function Home() {
                 documentIds: readyDocumentIds,
                 conversationId,
                 recentMessages: clientRecentMessages,
-                replyTo: activeReply ?? undefined
+                replyTo: activeReply ?? undefined,
+                ...(resolvedVoiceTranscript
+                  ? {
+                      voiceTranscript: {
+                        rawTranscript: resolvedVoiceTranscript.rawTranscript,
+                        cleanedTranscript: resolvedVoiceTranscript.cleanedTranscript,
+                        transcriptStatus: resolvedVoiceTranscript.transcriptStatus
+                      }
+                    }
+                  : {})
               }
         )
       });
@@ -1806,44 +1892,62 @@ export default function Home() {
               </span>
             </div>
           </div>
-          {activeConversationId ? (
-            <div className="top-bar-actions">
-              <button
-                aria-label={isActiveConversationPinned ? "Открепить чат" : "Закрепить чат"}
-                aria-pressed={isActiveConversationPinned}
-                className={`chat-share-button chat-pin-button ${
-                  isActiveConversationPinned ? "is-pinned" : ""
-                }`}
-                onClick={() => {
-                  void toggleConversationPin();
-                }}
-                title={isActiveConversationPinned ? "Открепить чат" : "Закрепить чат"}
-                type="button"
-              >
-                <Pin size={18} />
-              </button>
-              <button
-                aria-label="Файлы чата"
-                className="chat-share-button"
-                onClick={openChatFilesPanel}
-                title="Файлы чата"
-                type="button"
-              >
-                <FileText size={18} />
-              </button>
-              <button
-                aria-label="Копировать ссылку на чат"
-                className="chat-share-button"
-                onClick={() => {
-                  if (activeConversationId) void copyChatLink(activeConversationId);
-                }}
-                title="Копировать ссылку на чат"
-                type="button"
-              >
-                <Link2 size={18} />
-              </button>
-            </div>
-          ) : null}
+          <div className="top-bar-actions">
+            <button
+              aria-label="Проверять голос перед отправкой"
+              aria-pressed={reviewVoiceBeforeSend}
+              className={`chat-share-button chat-voice-review-toggle ${
+                reviewVoiceBeforeSend ? "is-active" : ""
+              }`}
+              onClick={toggleReviewVoiceBeforeSend}
+              title={
+                reviewVoiceBeforeSend
+                  ? "Голос вставляется для проверки"
+                  : "Проверять голос перед отправкой"
+              }
+              type="button"
+            >
+              <TextCursorInput size={18} />
+            </button>
+            {activeConversationId ? (
+              <>
+                <button
+                  aria-label={isActiveConversationPinned ? "Открепить чат" : "Закрепить чат"}
+                  aria-pressed={isActiveConversationPinned}
+                  className={`chat-share-button chat-pin-button ${
+                    isActiveConversationPinned ? "is-pinned" : ""
+                  }`}
+                  onClick={() => {
+                    void toggleConversationPin();
+                  }}
+                  title={isActiveConversationPinned ? "Открепить чат" : "Закрепить чат"}
+                  type="button"
+                >
+                  <Pin size={18} />
+                </button>
+                <button
+                  aria-label="Файлы чата"
+                  className="chat-share-button"
+                  onClick={openChatFilesPanel}
+                  title="Файлы чата"
+                  type="button"
+                >
+                  <FileText size={18} />
+                </button>
+                <button
+                  aria-label="Копировать ссылку на чат"
+                  className="chat-share-button"
+                  onClick={() => {
+                    void copyChatLink(activeConversationId);
+                  }}
+                  title="Копировать ссылку на чат"
+                  type="button"
+                >
+                  <Link2 size={18} />
+                </button>
+              </>
+            ) : null}
+          </div>
         </header>
 
         <div className="messages-pull-host">
@@ -1885,9 +1989,30 @@ export default function Home() {
               </div>
             </div>
           ) : null}
-          {!hasMessages && !showProjectView && !libraryView ? (
+          {!hasMessages && !showProjectView && !libraryView && activeConversationId == null ? (
             <div className="empty-state">
               <WelcomeRotatingText key={welcomeAnimationKey} />
+            </div>
+          ) : null}
+          {!hasMessages && !showProjectView && activeConversationId != null ? (
+            <div className="empty-state history-loading-state">
+              {isLoadingHistory ? (
+                <>
+                  <Loader2 aria-hidden="true" className="spin history-loading-spinner" size={28} />
+                  <p>Загрузка истории...</p>
+                </>
+              ) : historyLoadError ? (
+                <>
+                  <p>{historyLoadError}</p>
+                  <button
+                    className="history-retry-button"
+                    onClick={() => void loadMessages(activeConversationId)}
+                    type="button"
+                  >
+                    Повторить
+                  </button>
+                </>
+              ) : null}
             </div>
           ) : null}
           {hasMessages && !showProjectView ? (
@@ -1929,9 +2054,12 @@ export default function Home() {
                       {displayContent ? (
                         <div>
                           {renderMessageContent(displayContent, {
-                            term: highlightTerm,
-                            activeMatchIndex,
-                            startIndex: countMatchesInMessages(messages.slice(0, index), highlightTerm)
+                            highlight: {
+                              term: highlightTerm,
+                              activeMatchIndex,
+                              startIndex: countMatchesInMessages(messages.slice(0, index), highlightTerm)
+                            },
+                            onCopyNotify: setNote
                           })}
                         </div>
                       ) : null}
@@ -1956,6 +2084,12 @@ export default function Home() {
                     </div>
                     {displayContent ? (
                       <div className="message-actions message-actions-user">
+                        <MessageCopyButton
+                          copyLabel="Копировать сообщение"
+                          notifyMessage="Сообщение скопировано"
+                          onNotify={setNote}
+                          text={displayContent}
+                        />
                         <MessageReplyButton
                           label="Ответить на своё сообщение"
                           onReply={() => {
@@ -1986,9 +2120,12 @@ export default function Home() {
                   {displayContent ? (
                     <div>
                       {renderMessageContent(displayContent, {
-                        term: highlightTerm,
-                        activeMatchIndex,
-                        startIndex: countMatchesInMessages(messages.slice(0, index), highlightTerm)
+                        highlight: {
+                          term: highlightTerm,
+                          activeMatchIndex,
+                          startIndex: countMatchesInMessages(messages.slice(0, index), highlightTerm)
+                        },
+                        onCopyNotify: setNote
                       })}
                     </div>
                   ) : null}
@@ -2165,53 +2302,50 @@ export default function Home() {
               value={input}
             />
             <div className="composer-actions">
-              <button
-                aria-label={
-                  isRecording
-                    ? "Идёт запись"
-                    : isTranscribing
+              {showComposerMicButton ? (
+                <button
+                  aria-label={
+                    isTranscribing
                       ? "Распознавание речи"
                       : transcriptionError
                         ? "Ошибка распознавания"
                         : "Начать запись"
-                }
-                aria-pressed={isRecording}
-                className={`composer-mic-button ${
-                  isRecording ? "is-recording" : ""
-                } ${isTranscribing ? "is-transcribing" : ""} ${
-                  transcriptionError && !isRecording && !isTranscribing ? "has-error" : ""
-                }`}
-                disabled={isLoading || isRecording || isTranscribing}
-                onClick={() => {
-                  void startRecording();
-                }}
-                title={
-                  isRecording
-                    ? "Идёт запись"
-                    : isTranscribing
+                  }
+                  className={`composer-mic-button ${
+                    isTranscribing ? "is-transcribing" : ""
+                  } ${transcriptionError && !isTranscribing ? "has-error" : ""}`}
+                  disabled={isLoading || isTranscribing}
+                  onClick={() => {
+                    void startRecording();
+                  }}
+                  title={
+                    isTranscribing
                       ? "Распознавание..."
                       : transcriptionError
                         ? "Ошибка распознавания"
                         : "Микрофон"
-                }
-                type="button"
-              >
-                {isTranscribing ? (
-                  <Loader2 className="composer-mic-spinner" size={20} />
-                ) : (
-                  <Mic size={20} />
-                )}
-              </button>
-              <button
-                aria-label={isLoading ? "Остановить генерацию" : isRecording ? "Отправить запись" : "Отправить"}
-                className={`icon-button primary composer-send-button ${isLoading ? "stop-generation" : ""}`}
-                disabled={!isLoading && (isRecording ? false : !input.trim() && attachments.length === 0)}
-                onClick={isLoading ? stopGeneration : undefined}
-                title={isLoading ? "Остановить" : isRecording ? "Отправить запись" : "Отправить"}
-                type={isLoading ? "button" : "submit"}
-              >
-                {isLoading ? <Square size={18} fill="currentColor" /> : <Send size={20} />}
-              </button>
+                  }
+                  type="button"
+                >
+                  {isTranscribing ? (
+                    <Loader2 className="composer-mic-spinner" size={20} />
+                  ) : (
+                    <Mic size={20} />
+                  )}
+                </button>
+              ) : null}
+              {showComposerSendButton ? (
+                <button
+                  aria-label={isLoading ? "Остановить генерацию" : isRecording ? "Отправить запись" : "Отправить"}
+                  className={`icon-button primary composer-send-button ${isLoading ? "stop-generation" : ""}`}
+                  disabled={!isLoading && (isRecording ? false : !hasComposerContent)}
+                  onClick={isLoading ? stopGeneration : undefined}
+                  title={isLoading ? "Остановить" : isRecording ? "Отправить запись" : "Отправить"}
+                  type={isLoading ? "button" : "submit"}
+                >
+                  {isLoading ? <Square size={18} fill="currentColor" /> : <Send size={20} />}
+                </button>
+              ) : null}
             </div>
           </form>
           {note && note !== "Готово" && !showChatIndicator && !showCompactIndicator ? (

@@ -22,6 +22,7 @@ import {
   recordingStoppedAtSizeLimitMessage,
   type RecordingSizeStatus
 } from "@/lib/voice-recording";
+import type { VoiceTranscriptMeta } from "@/lib/transcription";
 
 type UseVoiceRecordingOptions = {
   disabled?: boolean;
@@ -29,7 +30,7 @@ type UseVoiceRecordingOptions = {
   getConversationId?: () => string | number | null | undefined;
   onNote: (message: string) => void;
   onTranscript?: (text: string) => void;
-  onTranscriptReady?: (text: string) => void;
+  onTranscriptReady?: (text: string, meta?: VoiceTranscriptMeta) => void;
 };
 
 export function useVoiceRecording({
@@ -120,7 +121,7 @@ export function useVoiceRecording({
       const requestId = ++transcribeRequestRef.current;
       setIsTranscribing(true);
       setTranscriptionError(null);
-      onNote("Распознавание речи...");
+      onNote("Распознавание и редактирование текста...");
 
       try {
         const formData = new FormData();
@@ -131,7 +132,14 @@ export function useVoiceRecording({
           body: formData
         });
 
-        let data: { text?: string; error?: string };
+        let data: {
+          text?: string;
+          rawTranscript?: string;
+          cleanedTranscript?: string | null;
+          appliedCorrections?: string[];
+          transcriptStatus?: VoiceTranscriptMeta["transcriptStatus"];
+          error?: string;
+        };
         try {
           data = (await response.json()) as { text?: string; error?: string };
         } catch {
@@ -152,13 +160,23 @@ export function useVoiceRecording({
         setPendingRecording(null);
         setTranscriptionError(null);
         const transcript = data.text.trim();
+        const transcriptMeta: VoiceTranscriptMeta = {
+          rawTranscript: data.rawTranscript?.trim() || transcript,
+          cleanedTranscript: data.cleanedTranscript?.trim() || null,
+          appliedCorrections: Array.isArray(data.appliedCorrections)
+            ? data.appliedCorrections.filter((item) => typeof item === "string")
+            : [],
+          transcriptStatus: data.transcriptStatus ?? "raw"
+        };
         logClientEvent("VOICE_TRANSCRIBE_SUCCESS", {
           conversationId: getConversationId?.() ?? null,
           recordingId: recording.id,
-          textLength: transcript.length
+          textLength: transcript.length,
+          transcriptStatus: transcriptMeta.transcriptStatus,
+          appliedCorrections: transcriptMeta.appliedCorrections
         });
         onTranscript?.(transcript);
-        onTranscriptReady?.(transcript);
+        onTranscriptReady?.(transcript, transcriptMeta);
       } catch (error) {
         if (requestId !== transcribeRequestRef.current) return;
 

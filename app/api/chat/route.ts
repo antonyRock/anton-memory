@@ -55,6 +55,11 @@ export async function POST(request: Request) {
       role: "user" | "assistant";
       content: string;
     };
+    voiceTranscript?: {
+      rawTranscript: string;
+      cleanedTranscript: string | null;
+      transcriptStatus: "raw" | "cleaned" | "cleanup_failed";
+    };
   };
 
   try {
@@ -73,6 +78,25 @@ export async function POST(request: Request) {
       ? {
           role: payload.replyTo.role,
           content: String(payload.replyTo.content).trim().slice(0, 4000)
+        }
+      : null;
+  const voiceTranscript =
+    payload.voiceTranscript &&
+    typeof payload.voiceTranscript.rawTranscript === "string" &&
+    payload.voiceTranscript.rawTranscript.trim()
+      ? {
+          rawTranscript: payload.voiceTranscript.rawTranscript.trim().slice(0, 20000),
+          cleanedTranscript:
+            typeof payload.voiceTranscript.cleanedTranscript === "string" &&
+            payload.voiceTranscript.cleanedTranscript.trim()
+              ? payload.voiceTranscript.cleanedTranscript.trim().slice(0, 20000)
+              : null,
+          transcriptStatus:
+            payload.voiceTranscript.transcriptStatus === "cleaned" ||
+            payload.voiceTranscript.transcriptStatus === "cleanup_failed" ||
+            payload.voiceTranscript.transcriptStatus === "raw"
+              ? payload.voiceTranscript.transcriptStatus
+              : ("raw" as const)
         }
       : null;
   const clientRecentMessages = (payload.recentMessages ?? []).filter(
@@ -138,6 +162,14 @@ export async function POST(request: Request) {
             {
               document_ids: attachedDocumentIds,
               referenced_conversation_ids: referencedConversationIds,
+              ...(voiceTranscript
+                ? {
+                    source: "voice",
+                    raw_transcript: voiceTranscript.rawTranscript,
+                    cleaned_transcript: voiceTranscript.cleanedTranscript,
+                    transcript_status: voiceTranscript.transcriptStatus
+                  }
+                : {}),
               ...(replyTo
                 ? {
                     reply_to: {

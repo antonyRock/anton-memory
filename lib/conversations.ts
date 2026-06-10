@@ -1,4 +1,4 @@
-import { getDocumentsForMessages } from "@/lib/documents";
+import { getDocumentsForMessages, type DocumentAttachment } from "@/lib/documents";
 import { getCurrentUserId } from "@/lib/current-user";
 import {
   metadataHasHeavyPayload,
@@ -451,7 +451,13 @@ export async function getConversationMessages(conversationId: string | number) {
     metadata: sanitizeMessageMetadataForClient(normalizeRecordMetadata(message.metadata))
   }));
   void cleanupHeavyMessageMetadata(messages);
-  const documentsByMessage = await getDocumentsForMessages(messages);
+
+  let documentsByMessage = new Map<string, DocumentAttachment[]>();
+  try {
+    documentsByMessage = await getDocumentsForMessages(messages);
+  } catch (error) {
+    console.error("Could not load message attachments:", error);
+  }
 
   return messages.map((message) => {
     const attachments = documentsByMessage.get(String(message.id)) ?? [];

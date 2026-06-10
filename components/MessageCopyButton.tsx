@@ -6,9 +6,20 @@ import { useState } from "react";
 type MessageCopyButtonProps = {
   text: string;
   onNotify?: (message: string) => void;
+  className?: string;
+  copyLabel?: string;
+  copiedLabel?: string;
+  notifyMessage?: string;
 };
 
-export function MessageCopyButton({ text, onNotify }: MessageCopyButtonProps) {
+export function MessageCopyButton({
+  text,
+  onNotify,
+  className = "",
+  copyLabel = "Копировать ответ",
+  copiedLabel = "Скопировано",
+  notifyMessage = "Ответ скопирован"
+}: MessageCopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
   async function handleCopy() {
@@ -17,7 +28,7 @@ export function MessageCopyButton({ text, onNotify }: MessageCopyButtonProps) {
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
-      onNotify?.("Ответ скопирован");
+      onNotify?.(notifyMessage);
       window.setTimeout(() => setCopied(false), 1800);
     } catch {
       onNotify?.("Не удалось скопировать");
@@ -26,12 +37,12 @@ export function MessageCopyButton({ text, onNotify }: MessageCopyButtonProps) {
 
   return (
     <button
-      aria-label={copied ? "Скопировано" : "Копировать ответ"}
-      className={`message-action-button ${copied ? "is-copied" : ""}`}
+      aria-label={copied ? copiedLabel : copyLabel}
+      className={`message-action-button ${copied ? "is-copied" : ""} ${className}`.trim()}
       onClick={() => {
         void handleCopy();
       }}
-      title={copied ? "Скопировано" : "Копировать"}
+      title={copied ? copiedLabel : copyLabel}
       type="button"
     >
       {copied ? <Check size={15} /> : <Copy size={15} />}

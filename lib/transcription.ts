@@ -3,6 +3,28 @@ import {
   transcriptionFallbackModel,
   transcriptionModel
 } from "@/lib/openai";
+import {
+  cleanupTranscript,
+  logTranscriptQuality,
+  type TranscriptStatus
+} from "@/lib/transcript-cleanup";
+import { buildTranscriptionPrompt } from "@/lib/transcript-prompt";
+
+export type TranscriptionResult = {
+  /** Text shown to the user and saved as message content. */
+  text: string;
+  rawTranscript: string;
+  cleanedTranscript: string | null;
+  appliedCorrections: string[];
+  transcriptStatus: TranscriptStatus;
+};
+
+export type VoiceTranscriptMeta = {
+  rawTranscript: string;
+  cleanedTranscript: string | null;
+  appliedCorrections?: string[];
+  transcriptStatus: TranscriptStatus;
+};
 
 function uniqueModels(models: string[]) {
   return [...new Set(models.filter(Boolean))];
@@ -24,7 +46,7 @@ function mapTranscriptionError(error: unknown) {
       return new Error("OpenAI не ответил вовремя. Попробуйте ещё раз.");
     }
 
-    if (message.includes("network") || message.includes("fetch failed")) {
+    if (message.includes("network") || message.includes("failed")) {
       return new Error("Сеть недоступна. Запись сохранена локально — нажмите «Повторить».");
     }
 
@@ -41,13 +63,28 @@ function mapTranscriptionError(error: unknown) {
 async function createTranscription(file: File, model: string) {
   const transcription = await getOpenAI().audio.transcriptions.create({
     file,
-    model
+    model,
+    language: "ru",
+    prompt: buildTranscriptionPrompt()
   });
 
   const text = transcription.text?.trim();
   if (!text) {
     throw new Error("Пустой результат распознавания.");
   }
+
+  console.info(
+    "[TRANSCRIPT_QUALITY]",
+    JSON.stringify(
+      {
+        stage: "stt",
+        model,
+        rawTranscript: text
+      },
+      null,
+      2
+    )
+  );
 
   return text;
 }
@@ -61,8 +98,47 @@ export async function transcribeAudio(file: File) {
       return await createTranscription(file, model);
     } catch (error) {
       lastError = mapTranscriptionError(error);
+      console.warn(`[TRANSCRIPT_QUALITY] STT failed for model ${model}:`, lastError.message);
     }
   }
 
   throw lastError ?? new Error("Не удалось распознать аудио.");
+}
+
+export async function transcribeAudioWithCleanup(file: File): Promise<TranscriptionResult> {
+  const rawTranscript = await transcribeAudio(file);
+  const { cleanedTranscript, appliedCorrections, transcriptStatus } =
+    await cleanupTranscript(rawTranscript);
+
+  if (transcriptStatus === "cleaned" && cleanedTranscript) {
+    logTranscriptQuality({
+      rawTranscript,
+      cleanedTranscript,
+      appliedCorrections,
+      transcriptStatus: "cleaned"
+    });
+
+    return {
+      text: cleanedTranscript,
+      rawTranscript,
+      cleanedTranscript,
+      appliedCorrections,
+      transcriptStatus: "cleaned"
+    };
+  }
+
+  logTranscriptQuality({
+    rawTranscript,
+    cleanedTranscript: null,
+    appliedCorrections: [],
+    transcriptStatus: "cleanup_failed"
+  });
+
+  return {
+    text: rawTranscript,
+    rawTranscript,
+    cleanedTranscript: null,
+    appliedCorrections: [],
+    transcriptStatus: "cleanup_failed"
+  };
 }

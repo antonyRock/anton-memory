@@ -36,7 +36,7 @@ export type StoredImageFile = {
   buffer: Buffer;
 };
 
-import { buildDocumentInlineUrl } from "@/lib/document-urls";
+import { buildDocumentDownloadUrl, buildDocumentInlineUrl } from "@/lib/document-urls";
 
 export { buildDocumentInlineUrl };
 
@@ -629,7 +629,7 @@ export async function getDocumentAttachments(ids: Array<string | number>) {
     metadata: sanitizeDocumentMetadataForClient(normalizeMetadata(document.metadata))
   }));
 
-  return Promise.all(sanitizedDocuments.map(toDocumentAttachment));
+  return sanitizedDocuments.map(toDocumentAttachment);
 }
 
 export async function getDocumentsForMessages(
@@ -637,19 +637,27 @@ export async function getDocumentsForMessages(
 ) {
   if (messages.length === 0) return new Map<string, DocumentAttachment[]>();
 
-  const supabase = getSupabase();
-  const messageIds = messages.map((message) => Number(message.id)).filter(Number.isFinite);
   const byMessage = new Map<string, DocumentAttachment[]>();
   const idsFromMetadata = new Map<string, Array<string | number>>();
 
   for (const message of messages) {
-    const metadata = message.metadata as { document_ids?: Array<string | number>; generated_document_id?: string | number } | null;
+    const metadata = message.metadata as {
+      document_ids?: Array<string | number>;
+      generated_document_id?: string | number;
+    } | null;
     const ids = [
       ...(metadata?.document_ids ?? []),
       ...(metadata?.generated_document_id ? [metadata.generated_document_id] : [])
     ];
     if (ids.length > 0) idsFromMetadata.set(String(message.id), ids);
   }
+
+  if (idsFromMetadata.size === 0) {
+    return byMessage;
+  }
+
+  const supabase = getSupabase();
+  const messageIds = messages.map((message) => Number(message.id)).filter(Number.isFinite);
 
   const linked = messageIds.length
     ? await supabase
@@ -889,21 +897,13 @@ async function getImageFiles(ids: Array<string | number>): Promise<StoredImageFi
   return images;
 }
 
-async function toDocumentAttachment(document: Record<string, unknown>): Promise<DocumentAttachment> {
+function toDocumentAttachment(document: Record<string, unknown>): DocumentAttachment {
   const fileType = String(document.file_type ?? "application/octet-stream");
   const metadata = normalizeMetadata(document.metadata);
-  const storagePath = String(document.storage_path ?? "");
   const isImage = isImageDocument(fileType, metadata);
   const documentId = document.id as string | number | undefined;
-  const proxyUrl =
-    isImage && documentId != null ? buildDocumentInlineUrl(documentId) : null;
-
-  let fileUrl: string | null = null;
-  if (isImage) {
-    fileUrl = proxyUrl;
-  } else if (storagePath) {
-    fileUrl = await createSignedUrl(storagePath);
-  }
+  const fileUrl =
+    documentId != null ? buildDocumentDownloadUrl(documentId, isImage) : null;
 
   return {
     id: documentId as string | number,
@@ -915,21 +915,6 @@ async function toDocumentAttachment(document: Record<string, unknown>): Promise<
     previewUrl: isImage ? fileUrl : null,
     fullUrl: fileUrl
   };
-}
-
-async function createSignedUrl(storagePath: string) {
-  const supabase = getSupabase();
-  // Temporary view link; a fresh one is created each time messages are loaded.
-  const { data, error } = await supabase.storage
-    .from(DOCUMENTS_BUCKET)
-    .createSignedUrl(storagePath, 60 * 60 * 24);
-
-  if (error) {
-    console.error("Could not create signed URL:", error.message);
-    return null;
-  }
-
-  return data.signedUrl;
 }
 
 type ExtractedFileContent = {

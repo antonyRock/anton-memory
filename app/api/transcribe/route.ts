@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { MAX_AUDIO_BYTES, formatAudioSize } from "@/lib/voice-recording";
-import { transcribeAudio } from "@/lib/transcription";
+import { transcribeAudioWithCleanup } from "@/lib/transcription";
 import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
@@ -34,7 +34,13 @@ export async function POST(request: Request) {
       );
     }
 
-    const text = await transcribeAudio(audio);
-    return NextResponse.json({ text });
+    const result = await transcribeAudioWithCleanup(audio);
+    return NextResponse.json({
+      text: result.text,
+      rawTranscript: result.rawTranscript,
+      cleanedTranscript: result.cleanedTranscript,
+      appliedCorrections: result.appliedCorrections,
+      transcriptStatus: result.transcriptStatus
+    });
   });
 }

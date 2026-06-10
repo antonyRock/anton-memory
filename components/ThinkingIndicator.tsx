@@ -14,7 +14,7 @@ const LABELS: Record<ThinkingPhase, string> = {
   memory: "Ищу в памяти...",
   file: "Обрабатываю файл...",
   image: "Создаю изображение...",
-  transcription: "Расшифровываю..."
+  transcription: "Расшифровываю и редактирую..."
 };
 
 function useSmoothVisible(active: boolean, delayMs = 400, fadeMs = 450) {

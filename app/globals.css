@@ -1053,6 +1053,7 @@ button {
 
 .chat-shell.empty .top-bar {
   display: flex;
+  padding-right: calc(clamp(16px, 4vw, 32px) + 52px);
 }
 
 .chat-share-button {
@@ -1097,6 +1098,18 @@ button {
   background: rgba(255, 221, 45, 0.18);
 }
 
+.chat-voice-review-toggle.is-active {
+  border-color: rgba(255, 221, 45, 0.58);
+  color: var(--accent);
+  background: rgba(255, 221, 45, 0.12);
+  box-shadow: 0 0 14px rgba(255, 221, 45, 0.14);
+}
+
+.chat-voice-review-toggle.is-active:hover {
+  border-color: rgba(255, 221, 45, 0.72);
+  background: rgba(255, 221, 45, 0.18);
+}
+
 
 .conversation-item-title {
   display: block;
@@ -1128,7 +1141,7 @@ button {
 
 .chat-shell.has-active-chat .top-bar,
 .chat-shell.with-messages .top-bar {
-  padding-right: calc(clamp(16px, 4vw, 32px) + 132px);
+  padding-right: calc(clamp(16px, 4vw, 32px) + 184px);
 }
 
 .top-bar {
@@ -1332,6 +1345,32 @@ button {
   color: var(--accent);
 }
 
+.history-loading-state {
+  gap: 12px;
+}
+
+.history-loading-state p {
+  margin: 0;
+}
+
+.history-loading-spinner {
+  color: var(--accent);
+}
+
+.history-retry-button {
+  margin-top: 4px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.history-retry-button:hover {
+  background: var(--surface-hover, rgba(255, 255, 255, 0.06));
+}
+
 .welcome-rotating-text-wrap {
   width: min(720px, 100%);
   min-height: clamp(78px, 12vw, 110px);
@@ -1474,6 +1513,69 @@ button {
 .bubble strong {
   color: var(--text);
   font-weight: 700;
+}
+
+.message-paste-block-wrap {
+  position: relative;
+  margin: 10px 0 0;
+}
+
+.message-paste-block-wrap:first-child {
+  margin-top: 4px;
+}
+
+.message-paste-block {
+  margin: 0;
+  padding: 12px 48px 12px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: none;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 14px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.message-paste-block code {
+  font: inherit;
+  color: inherit;
+  background: transparent;
+}
+
+.message-paste-copy-button {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+.message-paste-block-wrap:hover .message-paste-copy-button,
+.message-paste-block-wrap:focus-within .message-paste-copy-button {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+@media (hover: none) {
+  .message-paste-copy-button {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+.message-inline-code {
+  padding: 0.12em 0.38em;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 0.92em;
 }
 
 .message-actions {
