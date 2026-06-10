@@ -64,9 +64,9 @@ async function main() {
     const result = await cleanupTranscript(testCase.simulatedRaw);
 
     logTranscriptQuality({
-      rawTranscript: testCase.simulatedRaw,
-      cleanedTranscript: result.cleanedTranscript,
-      appliedCorrections: result.appliedCorrections,
+      rawTranscriptLength: testCase.simulatedRaw.length,
+      cleanedTranscriptLength: result.cleanedTranscript?.length ?? null,
+      appliedCorrectionsCount: result.appliedCorrections.length,
       transcriptStatus: result.transcriptStatus
     });
 

@@ -17,6 +17,10 @@ export type TranscriptionResult = {
   cleanedTranscript: string | null;
   appliedCorrections: string[];
   transcriptStatus: TranscriptStatus;
+  profile: {
+    sttMs: number;
+    cleanupMs: number;
+  };
 };
 
 export type VoiceTranscriptMeta = {
@@ -73,18 +77,7 @@ async function createTranscription(file: File, model: string) {
     throw new Error("Пустой результат распознавания.");
   }
 
-  console.info(
-    "[TRANSCRIPT_QUALITY]",
-    JSON.stringify(
-      {
-        stage: "stt",
-        model,
-        rawTranscript: text
-      },
-      null,
-      2
-    )
-  );
+  console.info(`[TRANSCRIPT_QUALITY] stage=stt model=${model} textLength=${text.length}`);
 
   return text;
 }
@@ -106,15 +99,19 @@ export async function transcribeAudio(file: File) {
 }
 
 export async function transcribeAudioWithCleanup(file: File): Promise<TranscriptionResult> {
+  const sttStartedAt = Date.now();
   const rawTranscript = await transcribeAudio(file);
+  const sttMs = Date.now() - sttStartedAt;
+  const cleanupStartedAt = Date.now();
   const { cleanedTranscript, appliedCorrections, transcriptStatus } =
     await cleanupTranscript(rawTranscript);
+  const cleanupMs = Date.now() - cleanupStartedAt;
 
   if (transcriptStatus === "cleaned" && cleanedTranscript) {
     logTranscriptQuality({
-      rawTranscript,
-      cleanedTranscript,
-      appliedCorrections,
+      rawTranscriptLength: rawTranscript.length,
+      cleanedTranscriptLength: cleanedTranscript.length,
+      appliedCorrectionsCount: appliedCorrections.length,
       transcriptStatus: "cleaned"
     });
 
@@ -123,14 +120,18 @@ export async function transcribeAudioWithCleanup(file: File): Promise<Transcript
       rawTranscript,
       cleanedTranscript,
       appliedCorrections,
-      transcriptStatus: "cleaned"
+      transcriptStatus: "cleaned",
+      profile: {
+        sttMs,
+        cleanupMs
+      }
     };
   }
 
   logTranscriptQuality({
-    rawTranscript,
-    cleanedTranscript: null,
-    appliedCorrections: [],
+    rawTranscriptLength: rawTranscript.length,
+    cleanedTranscriptLength: null,
+    appliedCorrectionsCount: 0,
     transcriptStatus: "cleanup_failed"
   });
 
@@ -139,6 +140,10 @@ export async function transcribeAudioWithCleanup(file: File): Promise<Transcript
     rawTranscript,
     cleanedTranscript: null,
     appliedCorrections: [],
-    transcriptStatus: "cleanup_failed"
+    transcriptStatus: "cleanup_failed",
+    profile: {
+      sttMs,
+      cleanupMs
+    }
   };
 }

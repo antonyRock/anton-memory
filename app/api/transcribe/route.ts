@@ -8,7 +8,9 @@ export const maxDuration = 120;
 
 export async function POST(request: Request) {
   return handleAuthenticatedRoute(request, async (_user) => {
+    const totalStartedAt = Date.now();
     const formData = await request.formData();
+    const uploadMs = Date.now() - totalStartedAt;
     const audio = formData.get("audio");
 
     if (!(audio instanceof File)) {
@@ -35,6 +37,11 @@ export async function POST(request: Request) {
     }
 
     const result = await transcribeAudioWithCleanup(audio);
+    const totalMs = Date.now() - totalStartedAt;
+
+    console.info(
+      `[tBrain voice profile]\n\nUpload: ${uploadMs} ms\nSTT: ${result.profile.sttMs} ms\nCleanup: ${result.profile.cleanupMs} ms\nTotal: ${totalMs} ms`
+    );
     return NextResponse.json({
       text: result.text,
       rawTranscript: result.rawTranscript,
