@@ -6,11 +6,11 @@ import {
   Folder,
   FolderOpen,
   MoreHorizontal,
-  Pin,
   Plus
 } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { isConversationPinned, sortConversationsForSidebar } from "@/lib/chat-pins";
+import { SidebarConversationItem } from "@/components/SidebarConversationItem";
 
 type Conversation = {
   id: string | number;
@@ -35,7 +35,7 @@ type ProjectFolderListProps = {
   openMenuProjectId: string | number | null;
   draggingConversationId: string | number | null;
   dropTargetProjectId: string | "general" | null;
-  onCreateProject: () => void;
+  onCreateProject: (title: string) => void | Promise<void>;
   onOpenProject: (projectId: string | number) => void;
   onToggleProject: (projectId: string | number) => void;
   onOpenMenu: (projectId: string | number) => void;
@@ -50,6 +50,10 @@ type ProjectFolderListProps = {
   onConversationContextMenu: (
     event: ReactMouseEvent,
     conversationId: string | number
+  ) => void;
+  onConversationLongPress: (
+    conversationId: string | number,
+    point: { x: number; y: number }
   ) => void;
   conversationTitle: (
     conversation: { id: string | number; title: string | null },
@@ -79,12 +83,23 @@ export function ProjectFolderList({
   onDragOverProject,
   onDropOnProject,
   onConversationContextMenu,
+  onConversationLongPress,
   conversationTitle
 }: ProjectFolderListProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const createProjectInputRef = useRef<HTMLInputElement | null>(null);
+  const skipCreateProjectSubmitRef = useRef(false);
+  const [isCreatingProject, setIsCreatingProject] = useState(false);
+  const [newProjectTitle, setNewProjectTitle] = useState("Новый проект");
   const [renamingProjectId, setRenamingProjectId] = useState<string | number | null>(null);
   const [renameValue, setRenameValue] = useState("");
+
+  useEffect(() => {
+    if (!isCreatingProject) return;
+    createProjectInputRef.current?.focus();
+    createProjectInputRef.current?.select();
+  }, [isCreatingProject]);
 
   useEffect(() => {
     if (renamingProjectId == null) return;
@@ -131,12 +146,60 @@ export function ProjectFolderList({
     if (title) onRenameProject(projectId, title);
   }
 
+  function cancelCreateProject() {
+    skipCreateProjectSubmitRef.current = true;
+    setIsCreatingProject(false);
+    setNewProjectTitle("Новый проект");
+  }
+
+  function submitCreateProject() {
+    if (skipCreateProjectSubmitRef.current) {
+      skipCreateProjectSubmitRef.current = false;
+      return;
+    }
+    const title = newProjectTitle.trim();
+    setIsCreatingProject(false);
+    setNewProjectTitle("Новый проект");
+    if (title) void onCreateProject(title);
+  }
+
   return (
     <div className="sidebar-section-block">
-      <button className="sidebar-inline-action" onClick={onCreateProject} type="button">
-        <Plus size={15} />
-        Новый проект
-      </button>
+      {isCreatingProject ? (
+        <div className="sidebar-inline-create-project">
+          <input
+            aria-label="Название нового проекта"
+            className="project-folder-rename-input sidebar-create-project-input"
+            onBlur={submitCreateProject}
+            onChange={(event) => setNewProjectTitle(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                submitCreateProject();
+              }
+              if (event.key === "Escape") {
+                event.preventDefault();
+                cancelCreateProject();
+              }
+            }}
+            placeholder="Название проекта"
+            ref={createProjectInputRef}
+            value={newProjectTitle}
+          />
+        </div>
+      ) : (
+        <button
+          className="sidebar-inline-action"
+          onClick={() => {
+            setIsCreatingProject(true);
+            setNewProjectTitle("Новый проект");
+          }}
+          type="button"
+        >
+          <Plus size={15} />
+          Новый проект
+        </button>
+      )}
 
       <div className="project-folder-list">
         {projects.map((project) => {
@@ -253,29 +316,24 @@ export function ProjectFolderList({
                 <div className="project-folder-chats-inner">
                   {projectConversations.length ? (
                     projectConversations.map((conversation, index) => (
-                      <button
-                        className={`conversation-item nested ${
-                          String(conversation.id) === String(activeConversationId) ? "active" : ""
-                        } ${String(draggingConversationId) === String(conversation.id) ? "is-dragging" : ""} ${
-                          isConversationPinned(conversation) ? "is-pinned" : ""
-                        }`}
-                        draggable
+                      <SidebarConversationItem
+                        active={String(conversation.id) === String(activeConversationId)}
+                        conversationId={conversation.id}
+                        dragging={String(draggingConversationId) === String(conversation.id)}
                         key={conversation.id}
-                        onClick={() => onOpenConversation(conversation.id)}
+                        nested
                         onContextMenu={(event) =>
                           onConversationContextMenu(event, conversation.id)
                         }
                         onDragEnd={onDragConversationEnd}
                         onDragStart={() => onDragConversationStart(conversation.id)}
-                        type="button"
-                      >
-                        <span className="conversation-item-title">
-                          {conversationTitle(conversation, projectConversations, index)}
-                        </span>
-                        {isConversationPinned(conversation) ? (
-                          <Pin aria-hidden className="conversation-pin-icon" size={11} strokeWidth={2} />
-                        ) : null}
-                      </button>
+                        onLongPress={(point) =>
+                          onConversationLongPress(conversation.id, point)
+                        }
+                        onOpen={() => onOpenConversation(conversation.id)}
+                        pinned={isConversationPinned(conversation)}
+                        title={conversationTitle(conversation, projectConversations, index)}
+                      />
                     ))
                   ) : (
                     <p className="project-folder-empty">Перетащите чат сюда</p>

@@ -1,12 +1,13 @@
 "use client";
 
-import { FolderPlus, FileText, Link2 } from "lucide-react";
+import { FolderPlus, FileText, Link2, Pencil } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 type ChatContextMenuProps = {
   x: number;
   y: number;
   onClose: () => void;
+  onRename: () => void;
   onCreateProject: () => void;
   onCopyLink: () => void;
   onOpenFiles: () => void;
@@ -16,6 +17,7 @@ export function ChatContextMenu({
   x,
   y,
   onClose,
+  onRename,
   onCreateProject,
   onCopyLink,
   onOpenFiles
@@ -23,7 +25,13 @@ export function ChatContextMenu({
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const onPointerDown = (event: MouseEvent) => {
+    let dismissEnabled = false;
+    const enableDismissTimer = window.setTimeout(() => {
+      dismissEnabled = true;
+    }, 350);
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!dismissEnabled) return;
       if (!menuRef.current?.contains(event.target as Node)) onClose();
     };
     const onKeyDown = (event: KeyboardEvent) => {
@@ -31,11 +39,12 @@ export function ChatContextMenu({
     };
     const onScroll = () => onClose();
 
-    window.addEventListener("mousedown", onPointerDown);
+    window.addEventListener("pointerdown", onPointerDown);
     window.addEventListener("keydown", onKeyDown);
     window.addEventListener("scroll", onScroll, true);
     return () => {
-      window.removeEventListener("mousedown", onPointerDown);
+      window.clearTimeout(enableDismissTimer);
+      window.removeEventListener("pointerdown", onPointerDown);
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("scroll", onScroll, true);
     };
@@ -60,6 +69,17 @@ export function ChatContextMenu({
 
   return (
     <div className="chat-context-menu" ref={menuRef} role="menu" style={{ left: x, top: y }}>
+      <button
+        onClick={() => {
+          onRename();
+          onClose();
+        }}
+        role="menuitem"
+        type="button"
+      >
+        <Pencil size={15} />
+        Переименовать
+      </button>
       <button
         onClick={() => {
           onCopyLink();

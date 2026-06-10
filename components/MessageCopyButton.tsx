@@ -2,6 +2,7 @@
 
 import { Check, Copy } from "lucide-react";
 import { useState } from "react";
+import { copyTextToClipboard } from "@/lib/copy-to-clipboard";
 
 type MessageCopyButtonProps = {
   text: string;
@@ -22,26 +23,24 @@ export function MessageCopyButton({
 }: MessageCopyButtonProps) {
   const [copied, setCopied] = useState(false);
 
-  async function handleCopy() {
+  function handleCopy() {
     if (!text.trim()) return;
 
-    try {
-      await navigator.clipboard.writeText(text);
+    if (copyTextToClipboard(text)) {
       setCopied(true);
       onNotify?.(notifyMessage);
       window.setTimeout(() => setCopied(false), 1800);
-    } catch {
-      onNotify?.("Не удалось скопировать");
+      return;
     }
+
+    onNotify?.("Не удалось скопировать");
   }
 
   return (
     <button
       aria-label={copied ? copiedLabel : copyLabel}
       className={`message-action-button ${copied ? "is-copied" : ""} ${className}`.trim()}
-      onClick={() => {
-        void handleCopy();
-      }}
+      onClick={handleCopy}
       title={copied ? copiedLabel : copyLabel}
       type="button"
     >

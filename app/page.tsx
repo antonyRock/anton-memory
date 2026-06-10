@@ -23,6 +23,7 @@ import { SidebarUserProfile } from "@/components/SidebarUserProfile";
 import { ProjectFolderList } from "@/components/ProjectFolderList";
 import { ChatFilesPanel } from "@/components/ChatFilesPanel";
 import { ChatContextMenu } from "@/components/ChatContextMenu";
+import { SidebarConversationItem } from "@/components/SidebarConversationItem";
 import { ProjectNavigator } from "@/components/ProjectNavigator";
 import { ObsidianBackground } from "@/components/ObsidianBackground";
 import { WelcomeRotatingText } from "@/components/WelcomeRotatingText";
@@ -30,6 +31,7 @@ import {
   buildChatUrl,
   syncChatQueryParam
 } from "@/lib/chat-links";
+import { shareOrCopyText } from "@/lib/copy-to-clipboard";
 import { logClientEvent } from "@/lib/client-log";
 import { isConversationPinned, sortConversationsForSidebar } from "@/lib/chat-pins";
 import type { FileNavItem } from "@/lib/file-nav-shared";
@@ -210,12 +212,23 @@ export default function Home() {
   const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
   const [isRenamingChat, setIsRenamingChat] = useState(false);
   const [renameChatValue, setRenameChatValue] = useState("");
+  const [mobileRenameChat, setMobileRenameChat] = useState<{
+    conversationId: string | number;
+    value: string;
+  } | null>(null);
   const [pullToRefreshEnabled, setPullToRefreshEnabled] = useState(false);
   const activeRequestRef = useRef<AbortController | null>(null);
   const streamReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const composerTextareaRef = useRef<ComposerTextareaHandle | null>(null);
   const chatRenameInputRef = useRef<HTMLInputElement | null>(null);
+  const mobileRenameInputRef = useRef<HTMLInputElement | null>(null);
+  const mobileRenameOpenedRef = useRef(false);
+  const pendingChatRenameRef = useRef<{
+    conversationId: string | number;
+    title: string;
+  } | null>(null);
+  const renameBlurGuardRef = useRef(false);
   const submitInFlightRef = useRef(false);
   const activeConversationIdRef = useRef<string | number | null>(null);
   activeConversationIdRef.current = activeConversationId;
@@ -368,9 +381,35 @@ export default function Home() {
   }, [search, activeConversationId]);
 
   useEffect(() => {
+    if (
+      pendingChatRenameRef.current != null &&
+      String(pendingChatRenameRef.current.conversationId) === String(activeConversationId)
+    ) {
+      const pending = pendingChatRenameRef.current;
+      pendingChatRenameRef.current = null;
+      setRenameChatValue(pending.title);
+      setIsRenamingChat(true);
+      return;
+    }
+
     setIsRenamingChat(false);
     setRenameChatValue("");
   }, [activeConversationId]);
+
+  useEffect(() => {
+    if (!mobileRenameChat) {
+      mobileRenameOpenedRef.current = false;
+      return;
+    }
+    if (mobileRenameOpenedRef.current) return;
+    mobileRenameOpenedRef.current = true;
+
+    const handle = window.setTimeout(() => {
+      mobileRenameInputRef.current?.focus();
+      mobileRenameInputRef.current?.select();
+    }, 40);
+    return () => window.clearTimeout(handle);
+  }, [mobileRenameChat]);
 
   useEffect(() => {
     setActivityPhase((current) => {
@@ -398,8 +437,13 @@ export default function Home() {
 
   useEffect(() => {
     if (!isRenamingChat) return;
+    renameBlurGuardRef.current = true;
+    const guardHandle = window.setTimeout(() => {
+      renameBlurGuardRef.current = false;
+    }, 450);
     chatRenameInputRef.current?.focus();
     chatRenameInputRef.current?.select();
+    return () => window.clearTimeout(guardHandle);
   }, [isRenamingChat]);
 
   useEffect(() => {
@@ -564,6 +608,42 @@ export default function Home() {
     }
   }
 
+  function focusComposer() {
+    window.requestAnimationFrame(() => {
+      composerTextareaRef.current?.focus();
+      window.setTimeout(() => composerTextareaRef.current?.focus(), 150);
+    });
+  }
+
+  function openCreatedProjectChat(projectId: string | number, conversationId: string | number) {
+    pendingNewChatProjectIdRef.current = null;
+    creatingChatRef.current = false;
+    cancelPendingMessageLoad();
+    shouldAutoScrollRef.current = false;
+    resetMessagesScroll();
+    setShowChatFilesPanel(false);
+    setLibraryView(null);
+    setPreviewImage(null);
+    setMessages([]);
+    setInput("");
+    setAttachments([]);
+    setSearch("");
+    setSearchResults([]);
+    setHighlightTerm("");
+    setActiveMatchIndex(0);
+    setExpandedProjectIds((current) => ({ ...current, [String(projectId)]: true }));
+    setProjectsCollapsed(false);
+    setActiveProjectId(null);
+    setActiveConversationId(conversationId);
+    activeConversationIdRef.current = conversationId;
+    window.localStorage.setItem("activeConversationId", String(conversationId));
+    syncChatQueryParam(conversationId);
+    setNote(DEFAULT_CHAT_TITLE);
+    closeSidebarIfMobile();
+    setSidebarOpen(false);
+    focusComposer();
+  }
+
   async function createProject(options?: {
     title?: string;
     promptDefault?: string;
@@ -589,9 +669,17 @@ export default function Home() {
 
       if (options?.conversationId != null) {
         await moveConversationToProject(options.conversationId, project.id);
+        setSidebarOpen(false);
+        closeSidebarIfMobile();
+      } else {
+        const conversationId = await createConversation(project.id);
+        if (!conversationId) {
+          setNote("Не удалось создать чат в проекте");
+          return project;
+        }
+        openCreatedProjectChat(project.id, conversationId);
       }
 
-      setSidebarOpen(false);
       return project;
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Не удалось создать проект");
@@ -599,14 +687,48 @@ export default function Home() {
     }
   }
 
+  function openChatContextMenuAt(
+    conversationId: string | number,
+    x: number,
+    y: number
+  ) {
+    setChatContextMenu({ conversationId, x, y });
+  }
+
   function openChatContextMenu(event: ReactMouseEvent, conversationId: string | number) {
     event.preventDefault();
     event.stopPropagation();
-    setChatContextMenu({
-      conversationId,
-      x: event.clientX,
-      y: event.clientY
-    });
+    openChatContextMenuAt(conversationId, event.clientX, event.clientY);
+  }
+
+  function openChatContextMenuFromLongPress(
+    conversationId: string | number,
+    point: { x: number; y: number }
+  ) {
+    openChatContextMenuAt(conversationId, point.x, point.y);
+  }
+
+  function beginChatRenameForConversation(conversationId: string | number) {
+    const conversation = conversations.find(
+      (item) => String(item.id) === String(conversationId)
+    );
+    if (!conversation) return;
+
+    const title = normalizeConversationTitle(conversation.title);
+
+    if (isMobileViewport()) {
+      setMobileRenameChat({ conversationId, value: title });
+      return;
+    }
+
+    if (String(activeConversationId) === String(conversationId)) {
+      setRenameChatValue(title);
+      setIsRenamingChat(true);
+      return;
+    }
+
+    pendingChatRenameRef.current = { conversationId, title };
+    openConversation(conversationId);
   }
 
   function createProjectFromChat(conversationId: string | number) {
@@ -724,21 +846,16 @@ export default function Home() {
     setRenameChatValue("");
   }
 
-  async function submitChatRename() {
-    if (!activeConversationId) {
-      cancelChatRename();
-      return;
-    }
-
-    const trimmed = renameChatValue.trim().slice(0, 80);
-    const currentTitle = normalizeConversationTitle(activeConversation?.title ?? null);
-    setIsRenamingChat(false);
-    setRenameChatValue("");
-
+  async function persistChatTitle(conversationId: string | number, rawTitle: string) {
+    const conversation = conversations.find(
+      (item) => String(item.id) === String(conversationId)
+    );
+    const trimmed = rawTitle.trim().slice(0, 80);
+    const currentTitle = normalizeConversationTitle(conversation?.title ?? null);
     if (!trimmed || trimmed === currentTitle) return;
 
     try {
-      const response = await authFetch(`/api/conversations/${activeConversationId}`, {
+      const response = await authFetch(`/api/conversations/${conversationId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ title: trimmed })
@@ -748,15 +865,32 @@ export default function Home() {
 
       const updated = data.conversation as Conversation;
       setConversations((current) =>
-        current.map((conversation) =>
-          String(conversation.id) === String(activeConversationId)
-            ? { ...conversation, ...updated }
-            : conversation
+        current.map((item) =>
+          String(item.id) === String(conversationId) ? { ...item, ...updated } : item
         )
       );
     } catch (error) {
       setNote(error instanceof Error ? error.message : "Не удалось переименовать чат");
     }
+  }
+
+  async function submitMobileChatRename() {
+    if (!mobileRenameChat) return;
+    const { conversationId, value } = mobileRenameChat;
+    setMobileRenameChat(null);
+    await persistChatTitle(conversationId, value);
+  }
+
+  async function submitChatRename() {
+    if (!activeConversationId) {
+      cancelChatRename();
+      return;
+    }
+
+    const trimmed = renameChatValue.trim().slice(0, 80);
+    setIsRenamingChat(false);
+    setRenameChatValue("");
+    await persistChatTitle(activeConversationId, trimmed);
   }
 
   async function toggleConversationPin() {
@@ -1044,12 +1178,19 @@ export default function Home() {
 
   async function copyChatLink(conversationId: string | number) {
     const url = buildChatUrl(conversationId);
-    try {
-      await navigator.clipboard.writeText(url);
+    const result = await shareOrCopyText(url, "Ссылка на чат");
+
+    if (result === "copied") {
       setNote("Ссылка на чат скопирована");
-    } catch {
-      setNote(url);
+      return;
     }
+    if (result === "shared") {
+      setNote("Ссылка отправлена");
+      return;
+    }
+    if (result === "cancelled") return;
+
+    setNote(`Не удалось скопировать. Ссылка: ${url}`);
   }
 
   async function createConversation(projectId?: string | number | null) {
@@ -1118,6 +1259,7 @@ export default function Home() {
         window.localStorage.setItem("activeConversationId", String(conversationId));
         syncChatQueryParam(conversationId);
         setNote(DEFAULT_CHAT_TITLE);
+        focusComposer();
       } finally {
         pendingNewChatProjectIdRef.current = null;
         creatingChatRef.current = false;
@@ -1861,6 +2003,7 @@ export default function Home() {
                       className="chat-title-rename-input"
                       maxLength={80}
                       onBlur={() => {
+                        if (renameBlurGuardRef.current) return;
                         void submitChatRename();
                       }}
                       onChange={(event) => setRenameChatValue(event.target.value)}
@@ -2470,8 +2613,9 @@ export default function Home() {
               dropTargetProjectId={dropTargetProjectId}
               expandedProjectIds={expandedProjectIds}
               onCloseMenu={() => setOpenMenuProjectId(null)}
-              onCreateProject={() => void createProject()}
+              onCreateProject={(title) => void createProject({ title })}
               onConversationContextMenu={openChatContextMenu}
+              onConversationLongPress={openChatContextMenuFromLongPress}
               onDeleteProject={(projectId) => void deleteProjectById(projectId)}
               onDragConversationEnd={handleConversationDragEnd}
               onDragConversationStart={handleConversationDragStart}
@@ -2521,27 +2665,21 @@ export default function Home() {
                 >
                   {generalConversations.length ? (
                     generalConversations.map((conversation, index) => (
-                      <button
-                        className={`conversation-item ${
-                          String(conversation.id) === String(activeConversationId) ? "active" : ""
-                        } ${String(draggingConversationId) === String(conversation.id) ? "is-dragging" : ""} ${
-                          isConversationPinned(conversation) ? "is-pinned" : ""
-                        }`}
-                        draggable
+                      <SidebarConversationItem
+                        active={String(conversation.id) === String(activeConversationId)}
+                        conversationId={conversation.id}
+                        dragging={String(draggingConversationId) === String(conversation.id)}
                         key={conversation.id}
-                        onClick={() => openConversation(conversation.id)}
                         onContextMenu={(event) => openChatContextMenu(event, conversation.id)}
                         onDragEnd={handleConversationDragEnd}
                         onDragStart={() => handleConversationDragStart(conversation.id)}
-                        type="button"
-                      >
-                        <span className="conversation-item-title">
-                          {conversationTitle(conversation, generalConversations, index)}
-                        </span>
-                        {isConversationPinned(conversation) ? (
-                          <Pin aria-hidden className="conversation-pin-icon" size={11} strokeWidth={2} />
-                        ) : null}
-                      </button>
+                        onLongPress={(point) =>
+                          openChatContextMenuFromLongPress(conversation.id, point)
+                        }
+                        onOpen={() => openConversation(conversation.id)}
+                        pinned={isConversationPinned(conversation)}
+                        title={conversationTitle(conversation, generalConversations, index)}
+                      />
                     ))
                   ) : (
                     <p className="sidebar-empty">Пока нет чатов</p>
@@ -2638,9 +2776,53 @@ export default function Home() {
             openConversation(chatContextMenu.conversationId);
             setShowChatFilesPanel(true);
           }}
+          onRename={() => beginChatRenameForConversation(chatContextMenu.conversationId)}
           x={chatContextMenu.x}
           y={chatContextMenu.y}
         />
+      ) : null}
+
+      {mobileRenameChat ? (
+        <div aria-labelledby="mobile-rename-chat-title" aria-modal="true" className="mobile-rename-sheet" role="dialog">
+          <button
+            aria-label="Закрыть"
+            className="mobile-rename-sheet-backdrop"
+            onClick={() => setMobileRenameChat(null)}
+            type="button"
+          />
+          <form
+            className="mobile-rename-sheet-panel"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitMobileChatRename();
+            }}
+          >
+            <h2 id="mobile-rename-chat-title">Переименовать чат</h2>
+            <input
+              aria-label="Название чата"
+              className="mobile-rename-sheet-input"
+              maxLength={80}
+              onChange={(event) =>
+                setMobileRenameChat((current) =>
+                  current ? { ...current, value: event.target.value } : current
+                )
+              }
+              ref={mobileRenameInputRef}
+              value={mobileRenameChat.value}
+            />
+            <div className="mobile-rename-sheet-actions">
+              <button
+                onClick={() => setMobileRenameChat(null)}
+                type="button"
+              >
+                Отмена
+              </button>
+              <button className="mobile-rename-sheet-submit" type="submit">
+                Сохранить
+              </button>
+            </div>
+          </form>
+        </div>
       ) : null}
     </main>
   );
