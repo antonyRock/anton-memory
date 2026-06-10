@@ -28,8 +28,8 @@ type UseVoiceRecordingOptions = {
   authFetch?: typeof fetch;
   getConversationId?: () => string | number | null | undefined;
   onNote: (message: string) => void;
-  onTranscript: (text: string) => void;
-  onTranscriptReady?: () => void;
+  onTranscript?: (text: string) => void;
+  onTranscriptReady?: (text: string) => void;
 };
 
 export function useVoiceRecording({
@@ -157,9 +157,8 @@ export function useVoiceRecording({
           recordingId: recording.id,
           textLength: transcript.length
         });
-        onTranscript(transcript);
-        onTranscriptReady?.();
-        onNote("Текст распознан — проверьте и отправьте");
+        onTranscript?.(transcript);
+        onTranscriptReady?.(transcript);
       } catch (error) {
         if (requestId !== transcribeRequestRef.current) return;
 

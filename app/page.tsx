@@ -131,7 +131,7 @@ type SearchResult = {
 };
 
 type LibraryView = "settings" | null;
-type MessageSubmitSource = "form" | "enter";
+type MessageSubmitSource = "form" | "enter" | "voice";
 
 const DEFAULT_CHAT_TITLE = "Новый чат";
 const MIN_SIDEBAR_WIDTH = 240;
@@ -230,11 +230,9 @@ export default function Home() {
     authFetch,
     getConversationId: () => activeConversationIdRef.current,
     onNote: setNote,
-    onTranscript: (text) => {
-      setInput((current) => (current.trim() ? `${current.trim()} ${text}` : text));
-    },
-    onTranscriptReady: () => {
-      composerTextareaRef.current?.focus();
+    onTranscriptReady: (text) => {
+      const combined = input.trim() ? `${input.trim()} ${text}` : text;
+      void sendMessage(combined, attachments, "voice");
     }
   });
   const messagesRef = useRef<HTMLElement | null>(null);

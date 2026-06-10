@@ -58,6 +58,66 @@ export async function getUserProfile(userId = DEFAULT_USER_ID): Promise<UserProf
   };
 }
 
+function mapUserProfileRow(
+  row: { id: unknown; display_name: unknown; avatar_url: unknown; tagline: unknown },
+  fallback: UserProfile
+): UserProfile {
+  return {
+    id: String(row.id),
+    displayName: String(row.display_name ?? fallback.displayName),
+    avatarUrl: row.avatar_url ? String(row.avatar_url) : null,
+    tagline: String(row.tagline ?? fallback.tagline)
+  };
+}
+
+export async function updateUserDisplayName(
+  userId: string,
+  displayName: string
+): Promise<UserProfile> {
+  const trimmed = displayName.trim();
+  if (!trimmed) {
+    throw new Error("Имя не может быть пустым");
+  }
+
+  const fallback = getDefaultUserProfile();
+  const supabase = getSupabase();
+  const updatedAt = new Date().toISOString();
+
+  const { data: updated, error: updateError } = await supabase
+    .from("users")
+    .update({
+      display_name: trimmed,
+      updated_at: updatedAt
+    })
+    .eq("id", userId)
+    .select("id, display_name, avatar_url, tagline")
+    .maybeSingle();
+
+  if (updateError) {
+    throw new Error(updateError.message);
+  }
+
+  if (updated) {
+    return mapUserProfileRow(updated, fallback);
+  }
+
+  const { data: inserted, error: insertError } = await supabase
+    .from("users")
+    .insert({
+      id: userId,
+      display_name: trimmed,
+      tagline: fallback.tagline
+    })
+    .select("id, display_name, avatar_url, tagline")
+    .single();
+
+  if (insertError) {
+    throw new Error(insertError.message);
+  }
+
+  return mapUserProfileRow(inserted, fallback);
+}
+
 async function getUserStatsViaRpc(userId: string): Promise<UserStats | null> {
   const supabase = getSupabase();
   const { data, error } = await supabase.rpc("get_user_stats", { p_user_id: userId });

@@ -4,7 +4,7 @@ import { BarChart3, LogOut, Settings, UserRound } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useAuthFetch } from "@/hooks/useAuthFetch";
-import { USER_STATS_CACHE_KEY, readDisplayNameOverride, writeDisplayNameOverride } from "@/lib/auth-client-state";
+import { USER_STATS_CACHE_KEY, writeDisplayNameOverride } from "@/lib/auth-client-state";
 
 type UserProfile = {
   id: string;
@@ -88,11 +88,7 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
   const [stats, setStats] = useState<UserStats>(EMPTY_STATS);
   const [isEditingName, setIsEditingName] = useState(false);
   const [draftName, setDraftName] = useState("");
-
-  function applyDisplayNameOverride(nextProfile: UserProfile, userId?: string) {
-    const override = readDisplayNameOverride(userId ?? session?.user.id);
-    return override ? { ...nextProfile, displayName: override } : nextProfile;
-  }
+  const [isSavingName, setIsSavingName] = useState(false);
 
   function beginNameEdit() {
     setMenuOpen(false);
@@ -100,18 +96,48 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
     setIsEditingName(true);
   }
 
-  function commitNameEdit() {
+  async function commitNameEdit() {
     const trimmed = draftName.trim();
     if (!trimmed) {
       setIsEditingName(false);
       return;
     }
 
-    setProfile((current) => ({ ...current, displayName: trimmed }));
-    if (session?.user.id) {
-      writeDisplayNameOverride(session.user.id, trimmed);
+    if (trimmed === profile.displayName) {
+      setIsEditingName(false);
+      return;
     }
+
+    const previousName = profile.displayName;
+    setProfile((current) => ({ ...current, displayName: trimmed }));
     setIsEditingName(false);
+    setIsSavingName(true);
+
+    try {
+      const response = await authFetch("/api/user", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: trimmed })
+      });
+      const data = (await response.json()) as { profile?: UserProfile; error?: string };
+      if (!response.ok) {
+        throw new Error(data.error ?? "Не удалось сохранить имя");
+      }
+
+      if (data.profile) {
+        setProfile(data.profile);
+        if (session?.user.id) {
+          writeDisplayNameOverride(session.user.id, data.profile.displayName);
+        }
+      }
+    } catch (error) {
+      setProfile((current) => ({ ...current, displayName: previousName }));
+      onNotify?.(
+        error instanceof Error ? error.message : "Не удалось сохранить имя"
+      );
+    } finally {
+      setIsSavingName(false);
+    }
   }
 
   function cancelNameEdit() {
@@ -137,14 +163,6 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
   }, [isEditingName]);
 
   useEffect(() => {
-    if (!session?.user.id) return;
-    const override = readDisplayNameOverride(session.user.id);
-    if (override) {
-      setProfile((current) => ({ ...current, displayName: override }));
-    }
-  }, [session?.user.id]);
-
-  useEffect(() => {
     const cached = readStatsCache();
     if (cached) setStats(cached.stats);
 
@@ -155,13 +173,7 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
         if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить профиль");
 
         if (data.profile) {
-          const loadedProfile = {
-            ...(data.profile as UserProfile),
-            displayName:
-              session?.user.email?.split("@")[0] ??
-              (data.profile as UserProfile).displayName
-          };
-          setProfile(applyDisplayNameOverride(loadedProfile, session?.user.id));
+          setProfile(data.profile as UserProfile);
         }
         if (data.stats) {
           const nextStats = data.stats as UserStats;
@@ -174,7 +186,7 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
     }, 0);
 
     return () => window.clearTimeout(handle);
-  }, [authFetch, session?.user.email]);
+  }, [authFetch, session?.user.id]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -224,15 +236,18 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
             <input
               aria-label="Имя пользователя"
               className="sidebar-user-name-input"
+              disabled={isSavingName}
               maxLength={40}
-              onBlur={commitNameEdit}
+              onBlur={() => {
+                void commitNameEdit();
+              }}
               onChange={(event) => setDraftName(event.target.value)}
               onClick={(event) => event.stopPropagation()}
               onKeyDown={(event) => {
                 event.stopPropagation();
                 if (event.key === "Enter") {
                   event.preventDefault();
-                  commitNameEdit();
+                  void commitNameEdit();
                 }
                 if (event.key === "Escape") {
                   event.preventDefault();
