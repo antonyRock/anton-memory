@@ -1629,6 +1629,15 @@ export default function Home() {
       return;
     }
     if (files.some((file) => file.status === "uploading")) {
+      if (source === "voice" && trimmed) {
+        setInput((current) => (current.trim() ? `${current.trim()} ${trimmed}` : trimmed));
+        if (voiceTranscript) {
+          pendingVoiceTranscriptRef.current = voiceTranscript;
+        }
+        setNote("Голос распознан. Дождитесь загрузки файла и отправьте сообщение.");
+        window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
+        return;
+      }
       setNote("Дождитесь загрузки файла");
       return;
     }

@@ -14,6 +14,33 @@
 
 ---
 
+## [0.2.2-beta] — 2026-06-10
+
+### Release: Mobile long-press UX, iPhone runtime fixes, voice/upload stability
+
+Production URL: [https://tbrain.vercel.app](https://tbrain.vercel.app)
+
+### Added
+
+- Долгое нажатие на чат в sidebar (мобилка) с контекстным меню
+- Пункт **«Переименовать»** в меню чата + мобильный bottom-sheet для переименования
+- Общий helper `createRuntimeId()` для генерации ID без зависимости от `crypto.randomUUID`
+
+### Changed
+
+- Логика автоскролла: порог «рядом с низом» увеличен до 200px
+- Автоскролл при отправке не срабатывает, если пользователь читает историю выше порога
+- Копирование ссылки/текста усилено fallback-логикой для iOS/HTTP сценариев
+
+### Fixed
+
+- Не открывалось/не отображалось меню долгого нажатия в мобильном sidebar
+- Режим переименования чата сбрасывался при переключении активного чата
+- На iPhone/старом WebView падало с `crypto.randomUUID is not a function`
+- При одновременной загрузке файла и голосовой диктовке распознанный текст мог теряться
+
+---
+
 ## [0.2.1-beta] — 2026-06-09
 
 ### Release: Voice auto-send & profile name fix
