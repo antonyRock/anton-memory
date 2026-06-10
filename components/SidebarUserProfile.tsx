@@ -1,9 +1,10 @@
 "use client";
 
 import { BarChart3, LogOut, Settings, UserRound } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useAuthFetch } from "@/hooks/useAuthFetch";
+import { USER_STATS_CACHE_KEY, readDisplayNameOverride, writeDisplayNameOverride } from "@/lib/auth-client-state";
 
 type UserProfile = {
   id: string;
@@ -23,8 +24,9 @@ type SidebarUserProfileProps = {
   onNotify?: (message: string) => void;
 };
 
-const STATS_CACHE_KEY = "tbrainUserStatsCache";
+const STATS_CACHE_KEY = USER_STATS_CACHE_KEY;
 const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
+const NAME_DOUBLE_TAP_MS = 400;
 
 const EMPTY_STATS: UserStats = { chats: 0, words: 0, days: 0 };
 
@@ -79,9 +81,68 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
   const { session, signOut } = useAuth();
   const { authFetch } = useAuthFetch();
   const rootRef = useRef<HTMLDivElement | null>(null);
+  const nameInputRef = useRef<HTMLInputElement | null>(null);
+  const lastNameTapRef = useRef<number | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [profile, setProfile] = useState<UserProfile>(DEFAULT_PROFILE);
   const [stats, setStats] = useState<UserStats>(EMPTY_STATS);
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [draftName, setDraftName] = useState("");
+
+  function applyDisplayNameOverride(nextProfile: UserProfile, userId?: string) {
+    const override = readDisplayNameOverride(userId ?? session?.user.id);
+    return override ? { ...nextProfile, displayName: override } : nextProfile;
+  }
+
+  function beginNameEdit() {
+    setMenuOpen(false);
+    setDraftName(profile.displayName);
+    setIsEditingName(true);
+  }
+
+  function commitNameEdit() {
+    const trimmed = draftName.trim();
+    if (!trimmed) {
+      setIsEditingName(false);
+      return;
+    }
+
+    setProfile((current) => ({ ...current, displayName: trimmed }));
+    if (session?.user.id) {
+      writeDisplayNameOverride(session.user.id, trimmed);
+    }
+    setIsEditingName(false);
+  }
+
+  function cancelNameEdit() {
+    setIsEditingName(false);
+    setDraftName("");
+  }
+
+  function handleNamePointerUp(event: PointerEvent<HTMLSpanElement>) {
+    event.stopPropagation();
+    const now = Date.now();
+    if (lastNameTapRef.current !== null && now - lastNameTapRef.current < NAME_DOUBLE_TAP_MS) {
+      lastNameTapRef.current = null;
+      beginNameEdit();
+      return;
+    }
+    lastNameTapRef.current = now;
+  }
+
+  useEffect(() => {
+    if (!isEditingName) return;
+    nameInputRef.current?.focus();
+    nameInputRef.current?.select();
+  }, [isEditingName]);
+
+  useEffect(() => {
+    if (!session?.user.id) return;
+    const override = readDisplayNameOverride(session.user.id);
+    if (override) {
+      setProfile((current) => ({ ...current, displayName: override }));
+    }
+  }, [session?.user.id]);
 
   useEffect(() => {
     const cached = readStatsCache();
@@ -94,12 +155,13 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
         if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить профиль");
 
         if (data.profile) {
-          setProfile({
+          const loadedProfile = {
             ...(data.profile as UserProfile),
             displayName:
               session?.user.email?.split("@")[0] ??
               (data.profile as UserProfile).displayName
-          });
+          };
+          setProfile(applyDisplayNameOverride(loadedProfile, session?.user.id));
         }
         if (data.stats) {
           const nextStats = data.stats as UserStats;
@@ -158,7 +220,43 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
         )}
 
         <span className="sidebar-user-copy">
-          <span className="sidebar-user-name">{profile.displayName}</span>
+          {isEditingName ? (
+            <input
+              aria-label="Имя пользователя"
+              className="sidebar-user-name-input"
+              maxLength={40}
+              onBlur={commitNameEdit}
+              onChange={(event) => setDraftName(event.target.value)}
+              onClick={(event) => event.stopPropagation()}
+              onKeyDown={(event) => {
+                event.stopPropagation();
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  commitNameEdit();
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  cancelNameEdit();
+                }
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+              ref={nameInputRef}
+              type="text"
+              value={draftName}
+            />
+          ) : (
+            <span
+              className="sidebar-user-name"
+              onDoubleClick={(event) => {
+                event.stopPropagation();
+                beginNameEdit();
+              }}
+              onPointerUp={handleNamePointerUp}
+              title="Двойной тап — изменить имя"
+            >
+              {profile.displayName}
+            </span>
+          )}
           <span className="sidebar-user-tagline">{profile.tagline}</span>
           <span className="sidebar-user-stats">
             Чатов:{" "}
@@ -204,9 +302,9 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
           <button
             className="sidebar-user-menu-item sidebar-user-menu-item-muted"
             onClick={() => {
-              void signOut().then(() => {
-                window.sessionStorage.removeItem(STATS_CACHE_KEY);
-                notify("Вы вышли из аккаунта");
+              setMenuOpen(false);
+              void signOut().catch(() => {
+                onNotify?.("Не удалось выйти");
               });
             }}
             role="menuitem"

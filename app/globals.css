@@ -642,6 +642,28 @@ button {
   font-size: 13px;
   font-weight: 700;
   line-height: 1.2;
+  cursor: text;
+  user-select: none;
+}
+
+.sidebar-user-name-input {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid rgba(255, 221, 45, 0.55);
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.2;
+  padding: 0 0 1px;
+  margin: 0;
+  outline: none;
+  box-shadow: none;
+}
+
+.sidebar-user-name-input:focus {
+  border-bottom-color: rgba(255, 221, 45, 0.9);
 }
 
 .sidebar-user-tagline {

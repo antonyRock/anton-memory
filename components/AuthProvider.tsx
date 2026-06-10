@@ -10,6 +10,7 @@ import {
   type ReactNode
 } from "react";
 import type { Session, SupabaseClient } from "@supabase/supabase-js";
+import { clearUserClientState } from "@/lib/auth-client-state";
 import { getSupabaseBrowserClient } from "@/lib/supabase-browser";
 
 type AuthContextValue = {
@@ -86,8 +87,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(async () => {
+    setSession(null);
+    setLoading(false);
+    clearUserClientState();
+
     if (!supabase) return;
-    await supabase.auth.signOut();
+
+    const { error } = await supabase.auth.signOut({ scope: "local" });
+    if (error) {
+      throw error;
+    }
   }, [supabase]);
 
   const value = useMemo(

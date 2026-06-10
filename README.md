@@ -1,84 +1,195 @@
-# Anton Memory
+# TBrain
 
-MVP PWA приложения "Второй мозг": чат в стиле ChatGPT с собственной долговременной памятью в Supabase PostgreSQL.
+Production: **[https://tbrain.vercel.app](https://tbrain.vercel.app)**  
+GitHub: **[github.com/antonyRock/anton-memory](https://github.com/antonyRock/anton-memory)**
 
-## Что уже есть
+PWA-чат «второй мозг»: ChatGPT-подобный интерфейс, долговременная память в Supabase PostgreSQL, голосовой ввод, проекты и файлы.
 
-- Next.js + TypeScript + App Router.
-- PWA: `manifest.webmanifest`, service worker, installable browser app.
-- Один экран чата: сообщения, ввод, отправка, микрофон, состояния записи и загрузки.
-- Backend API на Next.js:
-  - `POST /api/chat` сохраняет сообщение, подтягивает память, вызывает OpenAI, сохраняет ответ и запускает extractor.
-  - `POST /api/transcribe` принимает аудио и возвращает transcription.
-- Supabase tables:
-  - `messages`
-  - `facts`
-  - `entities`
-  - `tasks`
-- OpenAI chat response.
-- Базовый memory retrieval из `facts`, `entities`, `tasks`.
-- Memory extractor после каждого пользовательского сообщения.
-- Отдельный модуль transcription provider: `lib/transcription.ts`.
+**Последний релиз:** [Beta multi-user & voice update](docs/RELEASE_NOTES.md) · [CHANGELOG](docs/CHANGELOG.md)
 
-## Переменные окружения
+---
 
-Скопируйте `.env.example` в `.env.local` для локального запуска:
+## Быстрый старт (локально)
 
 ```bash
-NEXT_PUBLIC_SUPABASE_URL=https://slpnkzvetjhwchcobaig.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=...
-OPENAI_API_KEY=...
-OPENAI_CHAT_MODEL=gpt-4o-mini
-OPENAI_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
-```
-
-Важно: `SUPABASE_SERVICE_ROLE_KEY` используется только на backend. Не добавляйте его в клиентский код и не называйте с префиксом `NEXT_PUBLIC_`.
-
-## Ожидаемая схема Supabase
-
-SQL для таблиц и индексов лежит в `supabase/schema.sql`. Его можно выполнить в Supabase SQL Editor.
-
-Для MVP используется service role key, поэтому Row Level Security можно оставить включенным, но backend должен иметь доступ через server env. Для полноценного multi-user продукта следующим шагом стоит добавить `user_id`, auth и RLS policies.
-
-## Локальный запуск
-
-```bash
+git clone https://github.com/antonyRock/anton-memory.git
+cd anton-memory
 npm install
+cp .env.example .env.local
+# заполните .env.local (см. ниже)
 npm run dev
 ```
 
 Откройте [http://localhost:3000](http://localhost:3000).
 
-Микрофон в браузере работает на `localhost` и HTTPS. В production на Vercel будет HTTPS.
+Сборка production локально:
+
+```bash
+npm run build
+npm start
+```
+
+---
+
+## Переменные окружения
+
+Скопируйте `.env.example` → `.env.local` и заполните:
+
+| Переменная | Где используется | Описание |
+|------------|------------------|----------|
+| `NEXT_PUBLIC_SUPABASE_URL` | client + server | URL проекта Supabase |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | client | **anon public** key (Supabase → Settings → API) |
+| `SUPABASE_SERVICE_ROLE_KEY` | server only | service role key — **не** добавляйте в клиент |
+| `OPENAI_API_KEY` | server | ключ OpenAI |
+| `OPENAI_CHAT_MODEL` | server | модель чата, напр. `gpt-4o-mini` |
+| `OPENAI_TRANSCRIPTION_MODEL` | server | основная модель распознавания речи |
+| `OPENAI_TRANSCRIBE_MODEL` | server | alias для transcription provider |
+| `OPENAI_TRANSCRIBE_FALLBACK_MODEL` | server | fallback при ошибке основной модели |
+| `OPENAI_IMAGE_MODEL` | server | модель генерации изображений (опционально) |
+
+Пример минимального `.env.local`:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
+SUPABASE_SERVICE_ROLE_KEY=eyJ...
+OPENAI_API_KEY=sk-...
+OPENAI_CHAT_MODEL=gpt-4o-mini
+OPENAI_TRANSCRIPTION_MODEL=gpt-4o-transcribe
+OPENAI_TRANSCRIBE_MODEL=gpt-4o-transcribe
+OPENAI_TRANSCRIBE_FALLBACK_MODEL=gpt-4o-mini-transcribe
+```
+
+### Vercel (production)
+
+Добавьте **те же** переменные в [Vercel → tbrain → Settings → Environment Variables](https://vercel.com/antonyrocks-projects/tbrain/settings/environment-variables), включая `NEXT_PUBLIC_SUPABASE_ANON_KEY`. Без anon key на production появится экран «Auth не настроен».
+
+Канонический домен: **https://tbrain.vercel.app** (см. `vercel.json`).
+
+---
+
+## Supabase Auth (beta login)
+
+1. В Supabase включите **Authentication → Providers → Email** (email + password).
+2. Добавьте в `.env.local`:
+   - `NEXT_PUBLIC_SUPABASE_URL`
+   - `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+3. Выполните SQL-миграции multi-user (см. [Multi-user](#multi-user-beta)).
+4. Перезапустите dev-сервер: `npm run dev`.
+5. Откройте приложение — должен появиться экран входа. После login API получает JWT и фильтрует данные по `user_id`.
+
+Клиент: `AuthProvider`, `AuthGate`, `LoginScreen`.  
+Server: `lib/server-auth.ts`, `lib/request-context.ts` — JWT из `Authorization: Bearer` или `?access_token=` (для картинок).
+
+---
+
+## Beta-пользователи в Supabase (вручную)
+
+1. **Authentication → Users → Add user** — создайте email + password для каждого beta-тестера.
+2. Скопируйте **User UID** из карточки пользователя.
+3. В **SQL Editor** добавьте профиль в `public.users`:
+
+```sql
+insert into public.users (id, display_name, tagline)
+values (
+  '00000000-0000-0000-0000-000000000000'::uuid,  -- UID из auth.users
+  'Имя',
+  'Ты можешь всё!'
+)
+on conflict (id) do update
+set display_name = excluded.display_name, updated_at = now();
+```
+
+4. Для полной изоляции данных выполните миграции:
+   - `supabase/multi_user_migration.sql` — основная миграция `user_id` + RLS
+   - `supabase/multi_user_repair.sql` — если ранее был placeholder user из `users_migration.sql`
+
+Порядок для новой базы: `schema.sql` → остальные миграции по необходимости → `multi_user_migration.sql`.
+
+---
+
+## Проверка голосового ввода
+
+1. Запустите приложение на **HTTPS** или `localhost` (микрофон требует secure context).
+2. На iPhone по локальной сети (`http://192.168.x.x`) микрофон **не работает** — используйте [tbrain.vercel.app](https://tbrain.vercel.app) или `npm run dev:lan` с HTTPS-тunnel.
+3. Нажмите иконку микрофона в поле ввода, говорите, отпустите — текст появится после `/api/transcribe`.
+4. При ошибке сети запись сохраняется в **IndexedDB** (`tbrain-voice-recordings`) — можно повторить транскрибацию.
+5. Убедитесь, что заданы `OPENAI_API_KEY`, `OPENAI_TRANSCRIPTION_MODEL` и при необходимости `OPENAI_TRANSCRIBE_FALLBACK_MODEL`.
+
+---
+
+## Multi-user (beta)
+
+### Миграция БД
+
+```text
+supabase/multi_user_migration.sql   # user_id, backfill, RLS, profiles
+supabase/multi_user_repair.sql      # repair legacy placeholder user (если нужно)
+```
+
+Таблицы с `user_id`: `conversations`, `messages`, `projects`, `documents`, `facts`, `entities`, `tasks`.
+
+### Проверка изоляции
+
+1. Создайте двух пользователей в Supabase Auth (см. выше).
+2. Войдите под первым — создайте чат и сообщение.
+3. Выйдите, войдите под вторым — чаты первого пользователя не должны отображаться.
+4. Скрипт проверки (нужен `.env.local` с service role):
+
+```bash
+node scripts/verify-multi-user.mjs
+```
+
+Ожидание: все строки в 7 таблицах принадлежат ожидаемому `user_id`, профили в `public.users` на месте.
+
+---
 
 ## Деплой на Vercel
 
-1. Создайте GitHub repo `anton-memory`.
-2. Запушьте проект в GitHub.
-3. В Vercel выберите `New Project` и импортируйте `anton-memory`.
-4. Добавьте env vars:
-   - `NEXT_PUBLIC_SUPABASE_URL`
-   - `SUPABASE_SERVICE_ROLE_KEY`
-   - `OPENAI_API_KEY`
-   - `OPENAI_CHAT_MODEL`
-   - `OPENAI_TRANSCRIPTION_MODEL`
-5. Нажмите Deploy.
-6. После деплоя откройте URL проекта и установите PWA через браузер.
+1. Репозиторий: [github.com/antonyRock/anton-memory](https://github.com/antonyRock/anton-memory)
+2. Vercel-проект: **tbrain**, ветка `main`
+3. Push в `main` → автодеплой на **https://tbrain.vercel.app**
+4. В **Settings → Domains** оставьте только `tbrain.vercel.app` (удалите старые `chatgpt-*` алиасы, если остались)
+
+---
+
+## Структура проекта (кратко)
+
+| Область | Путь |
+|---------|------|
+| UI чата | `app/page.tsx` |
+| Auth | `components/AuthProvider.tsx`, `AuthGate.tsx`, `LoginScreen.tsx` |
+| Sidebar / профиль | `components/SidebarUserProfile.tsx` |
+| API | `app/api/*` |
+| Память | `lib/memory.ts`, `lib/chat-post-processing.ts` |
+| Голос | `hooks/useVoiceRecording.ts`, `lib/voice-recording.ts`, `lib/transcription.ts` |
+| SQL | `supabase/*.sql` |
+
+---
 
 ## Memory pipeline
 
-1. Пользовательское сообщение сохраняется в `messages`.
-2. Backend загружает свежую память из `facts`, `entities`, `tasks`.
-3. Память передается в system context модели.
-4. Ответ OpenAI сохраняется в `messages`.
-5. Отдельный extractor извлекает факты, сущности и задачи.
-6. Извлеченная память сохраняется в соответствующие таблицы.
+1. Сообщение пользователя сохраняется в `messages` (с `user_id`).
+2. Backend загружает память из `facts`, `entities`, `tasks`, документов.
+3. Контекст передаётся в OpenAI.
+4. Ответ сохраняется; **background memory extraction** обновляет память асинхронно.
+5. `/api/chat` поддерживает request profiling (`lib/request-profile.ts`).
 
-## Ограничения MVP
+---
 
-- Пока нет авторизации и разделения пользователей.
-- Retrieval простой: берет последние записи из таблиц памяти.
-- Extractor не дедуплицирует память.
-- Экспорт/import памяти еще не реализованы.
+## Документация релизов
 
-Эти ограничения намеренно оставлены, чтобы быстрее получить первый рабочий продукт.
+- [CHANGELOG.md](docs/CHANGELOG.md) — история изменений
+- [RELEASE_NOTES.md](docs/RELEASE_NOTES.md) — подробности текущего beta-релиза и known issues
+
+---
+
+## Known issues (кратко)
+
+См. полный список в [docs/RELEASE_NOTES.md#known-issues](docs/RELEASE_NOTES.md#known-issues):
+
+- RLS может включаться отдельным этапом после проверки `user_id` filtering
+- production env variables нужно добавлять в Vercel вручную
+- voice input на iPhone требует HTTPS
+- audio recordings хранятся временно до транскрибации
+- multi-user требует проверки на тестовых аккаунтах
