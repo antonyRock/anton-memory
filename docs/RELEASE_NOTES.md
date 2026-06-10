@@ -7,7 +7,7 @@
 | **Версия** | `0.2.0-beta` |
 | **Дата** | 2026-06-10 |
 | **Production** | [https://tbrain.vercel.app](https://tbrain.vercel.app) |
-| **Репозиторий** | [github.com/antonyRock/anton-memory](https://github.com/antonyRock/anton-memory) |
+| **Репозиторий** | [github.com/antonyRock/tbrain](https://github.com/antonyRock/tbrain) |
 
 Это beta-релиз: auth и multi-user готовы для ограниченного тестирования на нескольких аккаунтах. Перед широким rollout проверьте изоляцию данных и env на Vercel.
 

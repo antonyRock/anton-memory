@@ -1,7 +1,7 @@
 # TBrain
 
 Production: **[https://tbrain.vercel.app](https://tbrain.vercel.app)**  
-GitHub: **[github.com/antonyRock/anton-memory](https://github.com/antonyRock/anton-memory)**
+GitHub: **[github.com/antonyRock/tbrain](https://github.com/antonyRock/tbrain)** (клонировать в папку `tbrain`)
 
 PWA-чат «второй мозг»: ChatGPT-подобный интерфейс, долговременная память в Supabase PostgreSQL, голосовой ввод, проекты и файлы.
 
@@ -119,8 +119,8 @@ tBrain — это не просто чат.
 ## Быстрый старт (локально)
 
 ```bash
-git clone https://github.com/antonyRock/anton-memory.git
-cd anton-memory
+git clone https://github.com/antonyRock/tbrain.git
+cd tbrain
 npm install
 cp .env.example .env.local
 # заполните .env.local (см. ниже)
@@ -255,7 +255,7 @@ node scripts/verify-multi-user.mjs
 
 ## Деплой на Vercel
 
-1. Репозиторий: [github.com/antonyRock/anton-memory](https://github.com/antonyRock/anton-memory)
+1. Репозиторий: [github.com/antonyRock/tbrain](https://github.com/antonyRock/tbrain)
 2. Vercel-проект: **tbrain**, ветка `main`
 3. Push в `main` → автодеплой на **https://tbrain.vercel.app**
 4. В **Settings → Domains** оставьте только `tbrain.vercel.app` (удалите старые `chatgpt-*` алиасы, если остались)
