@@ -144,6 +144,12 @@ const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 420;
 const DEFAULT_SIDEBAR_WIDTH = 280;
 const SCROLL_BOTTOM_THRESHOLD = 200;
+const QUICK_ACTION_PROMPTS = [
+  "Какие ссылки я сохранил?",
+  "Что ты помнишь обо мне?",
+  "Покажи мои последние проекты",
+  "Что важного я обсуждал сегодня?"
+] as const;
 
 function readReplyFromMetadata(metadata?: Record<string, unknown>) {
   const reply = metadata?.reply_to;
@@ -267,6 +273,7 @@ export default function Home() {
   const sidebarScrollRef = useRef<HTMLDivElement | null>(null);
   const endRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
+  const userPausedAutoScrollRef = useRef(false);
   const stickToBottomConversationRef = useRef<string | null>(null);
   const stickToBottomTimerRef = useRef<number | null>(null);
   const resizingSidebarRef = useRef(false);
@@ -448,7 +455,7 @@ export default function Home() {
   }, [isRenamingChat]);
 
   useEffect(() => {
-    if (!shouldAutoScrollRef.current) return;
+    if (!shouldAutoScrollRef.current || userPausedAutoScrollRef.current) return;
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading, streamingAssistantText]);
 
@@ -472,11 +479,12 @@ export default function Home() {
       const atBottom = distanceFromBottom <= SCROLL_BOTTOM_THRESHOLD;
       if (!atBottom) {
         shouldAutoScrollRef.current = false;
+        userPausedAutoScrollRef.current = true;
         if (stickToBottomConversationRef.current === String(activeConversationId)) {
           stickToBottomConversationRef.current = null;
         }
-      } else if (isLoading || streamingAssistantText !== null) {
-        shouldAutoScrollRef.current = true;
+      } else if (!isLoading && streamingAssistantText === null) {
+        userPausedAutoScrollRef.current = false;
       }
       updateScrollToBottomVisibility();
     };
@@ -614,6 +622,13 @@ export default function Home() {
       composerTextareaRef.current?.focus();
       window.setTimeout(() => composerTextareaRef.current?.focus(), 150);
     });
+  }
+
+  function applyQuickActionPrompt(prompt: string) {
+    // TODO: later replace static cards with personalized prompts from memory usage.
+    setInput(prompt);
+    setNote("Подсказка добавлена в поле ввода");
+    window.requestAnimationFrame(() => composerTextareaRef.current?.focus());
   }
 
   function openCreatedProjectChat(projectId: string | number, conversationId: string | number) {
@@ -1370,6 +1385,7 @@ export default function Home() {
 
     pendingNewChatProjectIdRef.current = null;
     creatingChatRef.current = false;
+    userPausedAutoScrollRef.current = false;
     shouldAutoScrollRef.current = true;
     beginStickToBottom(conversationId);
     setShowChatFilesPanel(false);
@@ -1458,6 +1474,7 @@ export default function Home() {
   }
 
   function handleConversationMediaLoad() {
+    if (userPausedAutoScrollRef.current) return;
     if (shouldStickToBottom() || shouldAutoScrollRef.current) {
       scrollMessagesToBottom(false);
     }
@@ -1490,6 +1507,7 @@ export default function Home() {
 
     const started = performance.now();
     const observer = new ResizeObserver(() => {
+      if (userPausedAutoScrollRef.current) return;
       if (!shouldStickToBottom() && !shouldAutoScrollRef.current) return;
       apply();
       if (performance.now() - started > 3500) {
@@ -1501,6 +1519,7 @@ export default function Home() {
   }
 
   function scrollToChatBottom() {
+    userPausedAutoScrollRef.current = false;
     shouldAutoScrollRef.current = true;
     endRef.current?.scrollIntoView({ behavior: "smooth" });
     const node = messagesRef.current;
@@ -1695,6 +1714,7 @@ export default function Home() {
       replyToRole: activeReply?.role ?? null
     });
 
+    userPausedAutoScrollRef.current = false;
     shouldAutoScrollRef.current = isNearBottom();
     const clientRecentMessages = messages
       .filter((message) => message.role === "user" || message.role === "assistant")
@@ -2152,6 +2172,18 @@ export default function Home() {
           {!hasMessages && !showProjectView && !libraryView && activeConversationId == null ? (
             <div className="empty-state">
               <WelcomeRotatingText key={welcomeAnimationKey} />
+              <div className="quick-actions">
+                {QUICK_ACTION_PROMPTS.map((prompt) => (
+                  <button
+                    className="quick-action-card"
+                    key={prompt}
+                    onClick={() => applyQuickActionPrompt(prompt)}
+                    type="button"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
             </div>
           ) : null}
           {!hasMessages && !showProjectView && activeConversationId != null ? (
