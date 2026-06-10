@@ -148,7 +148,8 @@ npm start
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | client | **anon public** key (Supabase → Settings → API) |
 | `SUPABASE_SERVICE_ROLE_KEY` | server only | service role key — **не** добавляйте в клиент |
 | `OPENAI_API_KEY` | server | ключ OpenAI |
-| `OPENAI_CHAT_MODEL` | server | модель чата, напр. `gpt-4o-mini` |
+| `OPENAI_CHAT_MODEL` | server | модель чата, по умолчанию **`gpt-5.5`** |
+| `OPENAI_REASONING_EFFORT` | server | для GPT-5: `low` / `medium` / `high` (опционально) |
 | `OPENAI_TRANSCRIPTION_MODEL` | server | основная модель распознавания речи |
 | `OPENAI_TRANSCRIBE_MODEL` | server | alias для transcription provider |
 | `OPENAI_TRANSCRIBE_FALLBACK_MODEL` | server | fallback при ошибке основной модели |
@@ -161,7 +162,8 @@ NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJ...
 SUPABASE_SERVICE_ROLE_KEY=eyJ...
 OPENAI_API_KEY=sk-...
-OPENAI_CHAT_MODEL=gpt-4o-mini
+OPENAI_CHAT_MODEL=gpt-5.5
+OPENAI_REASONING_EFFORT=medium
 OPENAI_TRANSCRIPTION_MODEL=gpt-4o-transcribe
 OPENAI_TRANSCRIBE_MODEL=gpt-4o-transcribe
 OPENAI_TRANSCRIBE_FALLBACK_MODEL=gpt-4o-mini-transcribe

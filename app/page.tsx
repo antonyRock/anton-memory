@@ -33,6 +33,7 @@ import {
 import { logClientEvent } from "@/lib/client-log";
 import { isConversationPinned, sortConversationsForSidebar } from "@/lib/chat-pins";
 import type { FileNavItem } from "@/lib/file-nav-shared";
+import { renderMessageContent } from "@/lib/message-text";
 import { isMobileViewport } from "@/lib/viewport";
 import { useVoiceRecording } from "@/hooks/useVoiceRecording";
 import { useAuthFetch } from "@/hooks/useAuthFetch";
@@ -806,6 +807,17 @@ export default function Home() {
   function openSidebar() {
     setSidebarCollapsed(false);
     if (isMobileViewport()) {
+      setSidebarOpen(true);
+    }
+  }
+
+  function toggleSidebar() {
+    if (!isMobileViewport()) return;
+
+    if (sidebarOpen) {
+      setSidebarOpen(false);
+    } else {
+      setSidebarCollapsed(false);
       setSidebarOpen(true);
     }
   }
@@ -1737,6 +1749,19 @@ export default function Home() {
           </div>
         ) : null}
         <header className="top-bar">
+          <button
+            aria-expanded={sidebarOpen}
+            aria-label={sidebarOpen ? "Закрыть меню" : "Открыть меню"}
+            className="mobile-menu-button"
+            onClick={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              toggleSidebar();
+            }}
+            type="button"
+          >
+            {sidebarOpen ? <X size={20} /> : <PanelLeftOpen size={20} />}
+          </button>
           <div className="brand">
             <div className="brand-title">
               <strong>
@@ -1889,6 +1914,65 @@ export default function Home() {
                 key={`${message.role}-${index}`}
               >
                 {message.role === "assistant" ? <div className="avatar avatar-assistant">T</div> : null}
+                {message.role === "user" ? (
+                  <div className="message-stack message-stack-user">
+                    <div className="bubble">
+                      {message.replyTo ? (
+                        <div className="message-reply-quote">
+                          <span className="message-reply-quote-label">
+                            {message.replyTo.role === "assistant" ? "TBrain" : "Вы"}
+                          </span>
+                          <p className="message-reply-quote-text">
+                            {message.replyTo.content.slice(0, 220)}
+                            {message.replyTo.content.length > 220 ? "…" : ""}
+                          </p>
+                        </div>
+                      ) : null}
+                      {displayContent ? (
+                        <div>
+                          {renderMessageContent(displayContent, {
+                            term: highlightTerm,
+                            activeMatchIndex,
+                            startIndex: countMatchesInMessages(messages.slice(0, index), highlightTerm)
+                          })}
+                        </div>
+                      ) : null}
+                      {visibleAttachments.length ? (
+                        <MessageAttachments
+                          attachments={visibleAttachments}
+                          resolveAssetUrl={authUrl}
+                          onOpen={(attachment) => void openFileAttachment(attachment)}
+                          onPreview={setPreviewImage}
+                        />
+                      ) : null}
+                      {generatedImageUrl ? (
+                        <img
+                          className="generated-image"
+                          decoding="async"
+                          loading={index >= messages.length - 2 ? "eager" : "lazy"}
+                          onLoad={handleConversationMediaLoad}
+                          src={generatedImageUrl}
+                          alt="Generated result"
+                        />
+                      ) : null}
+                    </div>
+                    {displayContent ? (
+                      <div className="message-actions message-actions-user">
+                        <MessageReplyButton
+                          label="Ответить на своё сообщение"
+                          onReply={() => {
+                            beginReplyToMessage(
+                              message,
+                              () => composerTextareaRef.current?.focus(),
+                              setReplyTo,
+                              setNote
+                            );
+                          }}
+                        />
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
                 <div className="bubble">
                   {message.replyTo ? (
                     <div className="message-reply-quote">
@@ -1903,12 +1987,11 @@ export default function Home() {
                   ) : null}
                   {displayContent ? (
                     <div>
-                      {renderHighlightedText(
-                        displayContent,
-                        highlightTerm,
+                      {renderMessageContent(displayContent, {
+                        term: highlightTerm,
                         activeMatchIndex,
-                        countMatchesInMessages(messages.slice(0, index), highlightTerm)
-                      )}
+                        startIndex: countMatchesInMessages(messages.slice(0, index), highlightTerm)
+                      })}
                     </div>
                   ) : null}
                   {visibleAttachments.length ? (
@@ -1929,7 +2012,7 @@ export default function Home() {
                       alt="Generated result"
                     />
                   ) : null}
-                  {message.role === "assistant" && displayContent && !isStreamingBubble ? (
+                  {displayContent && !isStreamingBubble ? (
                     <div className="message-actions">
                       <MessageReplyButton
                         onReply={() => {
@@ -1944,22 +2027,8 @@ export default function Home() {
                       <MessageCopyButton onNotify={setNote} text={displayContent} />
                     </div>
                   ) : null}
-                  {message.role === "user" && displayContent ? (
-                    <div className="message-actions message-actions-user">
-                      <MessageReplyButton
-                        label="Ответить на своё сообщение"
-                        onReply={() => {
-                          beginReplyToMessage(
-                            message,
-                            () => composerTextareaRef.current?.focus(),
-                            setReplyTo,
-                            setNote
-                          );
-                        }}
-                      />
-                    </div>
-                  ) : null}
                 </div>
+                )}
                 {message.role === "user" ? <div className="avatar avatar-user">Я</div> : null}
               </article>
               );
@@ -2456,45 +2525,6 @@ function replaceLastAssistantMessage(
     next[next.length - 1] = { ...last, content, ...extras };
   }
   return next;
-}
-
-function renderHighlightedText(
-  text: string,
-  term: string,
-  activeMatchIndex: number,
-  startIndex: number
-) {
-  const query = term.trim();
-  if (!query) return text;
-
-  const lowerText = text.toLowerCase();
-  const lowerQuery = query.toLowerCase();
-  const parts: ReactNode[] = [];
-  let cursor = 0;
-  let matchIndex = startIndex;
-
-  while (true) {
-    const found = lowerText.indexOf(lowerQuery, cursor);
-    if (found === -1) break;
-
-    if (found > cursor) parts.push(text.slice(cursor, found));
-
-    const value = text.slice(found, found + query.length);
-    const isActive = matchIndex === activeMatchIndex;
-    parts.push(
-      <mark
-        className={`search-highlight ${isActive ? "active" : ""}`}
-        key={`${found}-${matchIndex}`}
-      >
-        {value}
-      </mark>
-    );
-    cursor = found + query.length;
-    matchIndex += 1;
-  }
-
-  if (cursor < text.length) parts.push(text.slice(cursor));
-  return parts.length > 0 ? parts : text;
 }
 
 function countMatchesInMessages(messages: ChatMessage[], term: string) {

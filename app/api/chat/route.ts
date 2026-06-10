@@ -7,7 +7,7 @@ import {
   type ChatContextMessage
 } from "@/lib/conversations";
 import { extractChatIdsFromText } from "@/lib/chat-links";
-import { chatModel, getOpenAI } from "@/lib/openai";
+import { chatModel, getChatCompletionParams, getOpenAI } from "@/lib/openai";
 import {
   buildDocumentsPromptForChat,
   getImageInputsForVision,
@@ -175,7 +175,7 @@ export async function POST(request: Request) {
         await profiler.measure("openAiRequestMs", async () => {
           const completion = await getOpenAI().chat.completions.create({
             model: chatModel,
-            temperature: 0.5,
+            ...getChatCompletionParams({ temperature: 0.5 }),
             stream: true,
             messages: [
               {
@@ -185,6 +185,7 @@ export async function POST(request: Request) {
                   "You do not have built-in persistent memory across requests. Before each reply, the app retrieves relevant context from external storage: facts, entities, tasks, documents, and messages from past chats.",
                   "Uploaded files are stored in file storage; their extracted text, summaries, and metadata are kept in the database and may appear in the memory context below.",
                   "Be natural, useful, direct, thoughtful, and conversational.",
+                  "Write plain conversational text. Do not use Markdown asterisks for bold (**like this**) or other Markdown decoration in normal replies. Code blocks are fine only when sharing code.",
                   "Handle writing, ideas, coding, analysis, reasoning, planning, brainstorming, and questions about the user's saved history.",
                   "When the user asks about past chats, documents, or files, use the memory context, referenced chats, and any uploaded file context provided in this request.",
                   "Do not say you cannot remember across sessions, that you forget after a chat ends, or that you have no access to past conversations when relevant data is present in the provided context.",
@@ -316,7 +317,7 @@ async function extractAndSaveMemory(
 ) {
   const result = await getOpenAI().chat.completions.create({
       model: chatModel,
-      temperature: 0,
+      ...getChatCompletionParams({ temperature: 0 }),
       response_format: { type: "json_object" },
       messages: [
         {

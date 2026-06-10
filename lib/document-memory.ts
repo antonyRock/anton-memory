@@ -1,4 +1,4 @@
-import { chatModel, getOpenAI } from "@/lib/openai";
+import { chatModel, getChatCompletionParams, getOpenAI } from "@/lib/openai";
 import { getSupabase } from "@/lib/supabase";
 import type { RawCell } from "@/lib/spreadsheet-parse";
 import { saveExtractedMemory, type MemoryExtraction } from "@/lib/memory";
@@ -82,7 +82,7 @@ async function extractMemoryWithModel(document: DocumentMemoryInput): Promise<Me
   try {
     const result = await getOpenAI().chat.completions.create({
       model: chatModel,
-      temperature: 0,
+      ...getChatCompletionParams({ temperature: 0 }),
       response_format: { type: "json_object" },
       messages: [
         {

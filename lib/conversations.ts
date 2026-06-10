@@ -6,7 +6,7 @@ import {
   resolveStoredImageUrl,
   sanitizeMessageMetadataForClient
 } from "@/lib/client-payload";
-import { getOpenAI, chatModel } from "@/lib/openai";
+import { getOpenAI, chatModel, getChatCompletionParams } from "@/lib/openai";
 import { searchProjects } from "@/lib/projects";
 import { getSupabase } from "@/lib/supabase";
 
@@ -586,7 +586,7 @@ export async function maybeGenerateConversationTitle(input: {
   try {
     const result = await getOpenAI().chat.completions.create({
       model: chatModel,
-      temperature: 0.2,
+      ...getChatCompletionParams({ temperature: 0.2 }),
       messages: [
         {
           role: "system",
