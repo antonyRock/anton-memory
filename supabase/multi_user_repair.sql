@@ -189,6 +189,29 @@ drop trigger if exists tasks_set_user_id on public.tasks;
 create trigger tasks_set_user_id
 before insert on public.tasks for each row execute function public.set_user_id_from_auth();
 
+create or replace function public.normalize_word_token(raw text)
+returns text language sql immutable as $$
+  select lower(regexp_replace(coalesce(raw, ''), '[^[:alpha:][:digit:]]', '', 'g'));
+$$;
+
+create or replace function public.is_meaningful_word(raw text)
+returns boolean language sql immutable as $$
+  select length(public.normalize_word_token(raw)) >= 2
+    and public.normalize_word_token(raw) not in (
+      'и', 'а', 'но', 'с', 'со', 'в', 'во', 'на', 'за', 'по', 'из', 'от', 'до', 'к', 'ко', 'у', 'о', 'об',
+      'я', 'ты', 'мы', 'вы', 'он', 'она', 'оно', 'они',
+      'не', 'ни', 'же', 'ли', 'бы', 'то', 'как', 'так', 'что', 'это', 'где', 'или', 'для', 'при', 'без',
+      'ещё', 'eще', 'уже', 'там', 'тут', 'вот'
+    );
+$$;
+
+create or replace function public.count_meaningful_words(p_text text)
+returns bigint language sql immutable as $$
+  select count(*)::bigint
+  from unnest(regexp_split_to_array(trim(coalesce(p_text, '')), '\s+')) as token(raw)
+  where public.is_meaningful_word(token.raw);
+$$;
+
 create or replace function public.get_user_stats(p_user_id uuid)
 returns table (chats bigint, words bigint, days bigint)
 language plpgsql stable as $$
@@ -197,8 +220,7 @@ begin
   select
     (select count(*)::bigint from public.conversations c where c.user_id = p_user_id),
     coalesce((
-      select sum(case when coalesce(trim(m.content), '') = '' then 0
-        else cardinality(regexp_split_to_array(trim(m.content), '\s+')) end)::bigint
+      select sum(public.count_meaningful_words(m.content))::bigint
       from public.messages m where m.role = 'user' and m.user_id = p_user_id
     ), 0),
     coalesce((

@@ -10,7 +10,7 @@ type RouteContext = {
 };
 
 export async function PATCH(request: Request, context: RouteContext) {
-  return handleAuthenticatedRoute(request, async () => {
+  return handleAuthenticatedRoute(request, async (_user) => {
     const { id } = await context.params;
     const body = await request.json();
 

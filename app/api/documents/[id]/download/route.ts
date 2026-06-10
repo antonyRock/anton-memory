@@ -31,7 +31,7 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
-  return handleAuthenticatedRoute(request, async () => {
+  return handleAuthenticatedRoute(request, async (_user) => {
     const { id } = await context.params;
     const payload = await getDocumentDownloadPayload(id);
     if (!payload) {

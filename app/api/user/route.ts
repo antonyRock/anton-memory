@@ -1,21 +1,21 @@
 import { NextResponse } from "next/server";
-import { getCurrentUserId } from "@/lib/current-user";
 import { getUserProfile, getUserStats, updateUserDisplayName } from "@/lib/users";
 import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  return handleAuthenticatedRoute(request, async () => {
-    const userId = getCurrentUserId();
-    const [profile, stats] = await Promise.all([getUserProfile(userId), getUserStats(userId)]);
+  return handleAuthenticatedRoute(request, async (user) => {
+    const [profile, stats] = await Promise.all([
+      getUserProfile(user.id, { email: user.email }),
+      getUserStats(user.id)
+    ]);
     return NextResponse.json({ profile, stats });
   });
 }
 
 export async function PATCH(request: Request) {
-  return handleAuthenticatedRoute(request, async () => {
-    const userId = getCurrentUserId();
+  return handleAuthenticatedRoute(request, async (user) => {
     let body: { displayName?: unknown };
     try {
       body = (await request.json()) as { displayName?: unknown };
@@ -27,7 +27,7 @@ export async function PATCH(request: Request) {
       return NextResponse.json({ error: "Укажите displayName" }, { status: 400 });
     }
 
-    const profile = await updateUserDisplayName(userId, body.displayName);
+    const profile = await updateUserDisplayName(user.id, body.displayName);
     return NextResponse.json({ profile });
   });
 }

@@ -87,9 +87,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(async () => {
+    const userId = session?.user.id;
+    clearUserClientState(userId);
     setSession(null);
     setLoading(false);
-    clearUserClientState();
 
     if (!supabase) return;
 
@@ -97,7 +98,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (error) {
       throw error;
     }
-  }, [supabase]);
+  }, [session?.user.id, supabase]);
 
   const value = useMemo(
     () => ({

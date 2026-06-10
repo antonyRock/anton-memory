@@ -8,7 +8,7 @@ export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
-  return handleAuthenticatedRoute(request, async () => {
+  return handleAuthenticatedRoute(request, async (_user) => {
     const { id } = await context.params;
     const attachments = await getDocumentAttachments([id]);
     const file = attachments[0] ?? null;

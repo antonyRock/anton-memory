@@ -18,7 +18,7 @@ export const runtime = "nodejs";
 export const maxDuration = 120;
 
 export async function POST(request: Request) {
-  return handleAuthenticatedRoute(request, async () => {
+  return handleAuthenticatedRoute(request, async (_user) => {
   const profiler = createRequestProfiler();
 
   try {

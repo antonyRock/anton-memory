@@ -4,7 +4,7 @@ import { BarChart3, LogOut, Settings, UserRound } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { useAuth } from "@/components/AuthProvider";
 import { useAuthFetch } from "@/hooks/useAuthFetch";
-import { USER_STATS_CACHE_KEY, writeDisplayNameOverride } from "@/lib/auth-client-state";
+import { userStatsCacheKey } from "@/lib/auth-client-state";
 
 type UserProfile = {
   id: string;
@@ -24,18 +24,24 @@ type SidebarUserProfileProps = {
   onNotify?: (message: string) => void;
 };
 
-const STATS_CACHE_KEY = USER_STATS_CACHE_KEY;
 const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
 const NAME_DOUBLE_TAP_MS = 400;
 
 const EMPTY_STATS: UserStats = { chats: 0, words: 0, days: 0 };
 
-const DEFAULT_PROFILE: UserProfile = {
-  id: "f224756a-d4ae-4f09-a315-9991c03ebe84",
-  displayName: "Антон",
-  avatarUrl: null,
-  tagline: "Ты можешь всё!"
-};
+function placeholderProfile(userId: string, email?: string | null): UserProfile {
+  const fromEmail = email?.split("@")[0]?.trim();
+  return {
+    id: userId,
+    displayName: fromEmail || "…",
+    avatarUrl: null,
+    tagline: "Ты можешь всё!"
+  };
+}
+
+function profileMatchesUser(userId: string, nextProfile: UserProfile) {
+  return String(nextProfile.id) === String(userId);
+}
 
 function formatStatNumber(value: number) {
   return new Intl.NumberFormat("ru-RU").format(Math.max(0, value));
@@ -46,15 +52,15 @@ function profileInitial(name: string) {
   return trimmed ? trimmed.charAt(0).toUpperCase() : "?";
 }
 
-function readStatsCache():
+function readStatsCache(userId: string | undefined):
   | {
       stats: UserStats;
       fetchedAt: number;
     }
   | null {
-  if (typeof window === "undefined") return null;
+  if (!userId || typeof window === "undefined") return null;
   try {
-    const raw = window.sessionStorage.getItem(STATS_CACHE_KEY);
+    const raw = window.sessionStorage.getItem(userStatsCacheKey(userId));
     if (!raw) return null;
     const parsed = JSON.parse(raw) as { stats?: UserStats; fetchedAt?: number };
     if (!parsed.stats || typeof parsed.fetchedAt !== "number") return null;
@@ -65,11 +71,11 @@ function readStatsCache():
   }
 }
 
-function writeStatsCache(stats: UserStats) {
+function writeStatsCache(userId: string, stats: UserStats) {
   if (typeof window === "undefined") return;
   try {
     window.sessionStorage.setItem(
-      STATS_CACHE_KEY,
+      userStatsCacheKey(userId),
       JSON.stringify({ stats, fetchedAt: Date.now() })
     );
   } catch {
@@ -84,7 +90,11 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
   const nameInputRef = useRef<HTMLInputElement | null>(null);
   const lastNameTapRef = useRef<number | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
-  const [profile, setProfile] = useState<UserProfile>(DEFAULT_PROFILE);
+  const [profile, setProfile] = useState<UserProfile>(() =>
+    session?.user.id
+      ? placeholderProfile(session.user.id, session.user.email)
+      : { id: "", displayName: "…", avatarUrl: null, tagline: "Ты можешь всё!" }
+  );
   const [stats, setStats] = useState<UserStats>(EMPTY_STATS);
   const [isEditingName, setIsEditingName] = useState(false);
   const [draftName, setDraftName] = useState("");
@@ -124,11 +134,10 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
         throw new Error(data.error ?? "Не удалось сохранить имя");
       }
 
-      if (data.profile) {
+      if (data.profile && session?.user.id && profileMatchesUser(session.user.id, data.profile)) {
         setProfile(data.profile);
-        if (session?.user.id) {
-          writeDisplayNameOverride(session.user.id, data.profile.displayName);
-        }
+      } else if (data.profile && session?.user.id) {
+        onNotify?.("Получен чужой профиль — обновите страницу");
       }
     } catch (error) {
       setProfile((current) => ({ ...current, displayName: previousName }));
@@ -163,7 +172,15 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
   }, [isEditingName]);
 
   useEffect(() => {
-    const cached = readStatsCache();
+    const userId = session?.user.id;
+    if (!userId) return;
+
+    setProfile(placeholderProfile(userId, session.user.email));
+    setStats(EMPTY_STATS);
+    setIsEditingName(false);
+    setDraftName("");
+
+    const cached = readStatsCache(userId);
     if (cached) setStats(cached.stats);
 
     const handle = window.setTimeout(async () => {
@@ -172,21 +189,21 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
         const data = await response.json();
         if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить профиль");
 
-        if (data.profile) {
+        if (data.profile && profileMatchesUser(userId, data.profile as UserProfile)) {
           setProfile(data.profile as UserProfile);
         }
         if (data.stats) {
           const nextStats = data.stats as UserStats;
           setStats(nextStats);
-          writeStatsCache(nextStats);
+          writeStatsCache(userId, nextStats);
         }
       } catch {
-        setStats((current) => current ?? EMPTY_STATS);
+        setStats(EMPTY_STATS);
       }
     }, 0);
 
     return () => window.clearTimeout(handle);
-  }, [authFetch, session?.user.id]);
+  }, [authFetch, session?.user.email, session?.user.id]);
 
   useEffect(() => {
     if (!menuOpen) return;

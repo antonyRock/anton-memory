@@ -14,14 +14,14 @@ type RouteContext = {
 };
 
 export async function GET(request: Request, context: RouteContext) {
-  return handleAuthenticatedRoute(request, async () => {
+  return handleAuthenticatedRoute(request, async (_user) => {
     const { id } = await context.params;
     return NextResponse.json(await getProjectView(id));
   });
 }
 
 export async function PATCH(request: Request, context: RouteContext) {
-  return handleAuthenticatedRoute(request, async () => {
+  return handleAuthenticatedRoute(request, async (_user) => {
     const { id } = await context.params;
     const body = await request.json();
 
@@ -46,7 +46,7 @@ export async function PATCH(request: Request, context: RouteContext) {
 }
 
 export async function DELETE(request: Request, context: RouteContext) {
-  return handleAuthenticatedRoute(request, async () => {
+  return handleAuthenticatedRoute(request, async (_user) => {
     const { id } = await context.params;
     await deleteProject(id);
     return NextResponse.json({ ok: true });

@@ -19,6 +19,11 @@ function extractAccessToken(request: Request) {
 }
 
 export async function resolveRequestUserId(request: Request) {
+  const user = await resolveRequestUser(request);
+  return user.id;
+}
+
+export async function resolveRequestUser(request: Request) {
   const token = extractAccessToken(request);
   if (!token) {
     throw new ApiUnauthorizedError("Missing access token.");
@@ -40,17 +45,25 @@ export async function resolveRequestUserId(request: Request) {
     throw new ApiUnauthorizedError("Invalid access token.");
   }
 
-  return data.user.id;
+  return {
+    id: data.user.id,
+    email: data.user.email ?? null
+  };
 }
 
-export async function runAsUser<T>(request: Request, fn: () => T | Promise<T>) {
-  const userId = await resolveRequestUserId(request);
-  return runWithRequestUser(userId, fn);
+export type RequestUser = {
+  id: string;
+  email: string | null;
+};
+
+export async function runAsUser<T>(request: Request, fn: (user: RequestUser) => T | Promise<T>) {
+  const user = await resolveRequestUser(request);
+  return runWithRequestUser(user.id, () => fn(user), user.email);
 }
 
 export async function handleAuthenticatedRoute(
   request: Request,
-  handler: () => Promise<Response>
+  handler: (user: RequestUser) => Promise<Response>
 ) {
   try {
     return await runAsUser(request, handler);

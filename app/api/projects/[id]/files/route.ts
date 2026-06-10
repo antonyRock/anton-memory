@@ -9,7 +9,7 @@ type RouteContext = {
 };
 
 export async function GET(request: Request, context: RouteContext) {
-  return handleAuthenticatedRoute(request, async () => {
+  return handleAuthenticatedRoute(request, async (_user) => {
     const { id } = await context.params;
     const url = new URL(request.url);
     const search = url.searchParams.get("search") ?? "";

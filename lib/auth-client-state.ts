@@ -18,8 +18,15 @@ export function writeDisplayNameOverride(userId: string, displayName: string) {
   }
 }
 
-export function clearUserClientState() {
+export function userStatsCacheKey(userId: string) {
+  return `${USER_STATS_CACHE_KEY}:${userId}`;
+}
+
+export function clearUserClientState(userId?: string) {
   if (typeof window === "undefined") return;
+  if (userId) {
+    window.sessionStorage.removeItem(userStatsCacheKey(userId));
+  }
   window.sessionStorage.removeItem(USER_STATS_CACHE_KEY);
   window.localStorage.removeItem("activeConversationId");
 }

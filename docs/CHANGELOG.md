@@ -14,6 +14,28 @@
 
 ---
 
+## [0.2.1-beta] — 2026-06-09
+
+### Release: Voice auto-send & profile name fix
+
+Production URL: [https://tbrain.vercel.app](https://tbrain.vercel.app)
+
+### Added
+
+- `PATCH /api/user` — сохранение `display_name` в Supabase (`public.users`)
+
+### Changed
+
+- Голосовые сообщения отправляются сразу после распознавания, без шага «проверьте и отправьте»
+- Имя в sidebar сохраняется на сервере, а не только в `localStorage` браузера
+
+### Fixed
+
+- Имя профиля сбрасывалось после перезагрузки (перезапись частью email до `@`)
+- Локальное переименование не синхронизировалось между устройствами
+
+---
+
 ## [0.2.0-beta] — 2026-06-10
 
 ### Release: Beta multi-user & voice update

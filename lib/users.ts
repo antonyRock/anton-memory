@@ -1,4 +1,5 @@
 import { getSupabase } from "@/lib/supabase";
+import { countWordsInText } from "@/lib/word-count";
 
 export type UserProfile = {
   id: string;
@@ -24,14 +25,74 @@ export function getDefaultUserProfile(): UserProfile {
   };
 }
 
-export function countWordsInText(text: string) {
-  const trimmed = text.trim();
-  if (!trimmed) return 0;
-  return trimmed.split(/\s+/).filter(Boolean).length;
+export function deriveDisplayName(email?: string | null, explicit?: string) {
+  if (explicit?.trim()) return explicit.trim();
+  const fromEmail = email?.split("@")[0]?.trim();
+  if (fromEmail) return fromEmail;
+  return "Пользователь";
 }
 
-export async function getUserProfile(userId = DEFAULT_USER_ID): Promise<UserProfile> {
-  const fallback = getDefaultUserProfile();
+function emptyProfileForUser(userId: string, displayName = "Пользователь"): UserProfile {
+  return {
+    id: userId,
+    displayName,
+    avatarUrl: null,
+    tagline: "Ты можешь всё!"
+  };
+}
+
+export async function ensureUserProfile(
+  userId: string,
+  options: { displayName?: string; email?: string | null } = {}
+): Promise<UserProfile> {
+  const supabase = getSupabase();
+  const displayName = deriveDisplayName(options.email, options.displayName);
+
+  const { data: existing, error: existingError } = await supabase
+    .from("users")
+    .select("id, display_name, avatar_url, tagline")
+    .eq("id", userId)
+    .maybeSingle();
+
+  if (existingError) {
+    throw new Error(existingError.message);
+  }
+
+  if (existing) {
+    return mapUserProfileRow(existing, emptyProfileForUser(userId, displayName));
+  }
+
+  const { data: inserted, error: insertError } = await supabase
+    .from("users")
+    .insert({
+      id: userId,
+      display_name: displayName,
+      tagline: "Ты можешь всё!"
+    })
+    .select("id, display_name, avatar_url, tagline")
+    .single();
+
+  if (insertError) {
+    if (/duplicate|unique/i.test(insertError.message)) {
+      const { data: retry, error: retryError } = await supabase
+        .from("users")
+        .select("id, display_name, avatar_url, tagline")
+        .eq("id", userId)
+        .maybeSingle();
+      if (retryError) throw new Error(retryError.message);
+      if (retry) return mapUserProfileRow(retry, emptyProfileForUser(userId, displayName));
+    }
+    throw new Error(insertError.message);
+  }
+
+  return mapUserProfileRow(inserted, emptyProfileForUser(userId, displayName));
+}
+
+export async function getUserProfile(
+  userId: string,
+  options: { email?: string | null } = {}
+): Promise<UserProfile> {
+  const fallback = emptyProfileForUser(userId, deriveDisplayName(options.email));
   const supabase = getSupabase();
 
   const { data, error } = await supabase
@@ -42,20 +103,17 @@ export async function getUserProfile(userId = DEFAULT_USER_ID): Promise<UserProf
 
   if (error) {
     if (/relation .*users.* does not exist/i.test(error.message)) {
-      return fallback;
+      return getDefaultUserProfile();
     }
     console.error("Could not load user profile:", error.message);
     return fallback;
   }
 
-  if (!data) return fallback;
+  if (!data) {
+    return ensureUserProfile(userId, { email: options.email });
+  }
 
-  return {
-    id: String(data.id),
-    displayName: String(data.display_name ?? fallback.displayName),
-    avatarUrl: data.avatar_url ? String(data.avatar_url) : null,
-    tagline: String(data.tagline ?? fallback.tagline)
-  };
+  return mapUserProfileRow(data, fallback);
 }
 
 function mapUserProfileRow(
@@ -79,7 +137,7 @@ export async function updateUserDisplayName(
     throw new Error("Имя не может быть пустым");
   }
 
-  const fallback = getDefaultUserProfile();
+  const fallback = emptyProfileForUser(userId, trimmed);
   const supabase = getSupabase();
   const updatedAt = new Date().toISOString();
 

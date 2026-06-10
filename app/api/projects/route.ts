@@ -5,14 +5,14 @@ import { handleAuthenticatedRoute } from "@/lib/server-auth";
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
-  return handleAuthenticatedRoute(request, async () => {
+  return handleAuthenticatedRoute(request, async (_user) => {
     const projects = await listProjects();
     return NextResponse.json({ projects });
   });
 }
 
 export async function POST(request: Request) {
-  return handleAuthenticatedRoute(request, async () => {
+  return handleAuthenticatedRoute(request, async (_user) => {
     const body = await request.json().catch(() => ({}));
     const project = await createProject({
       title: typeof body?.title === "string" ? body.title : undefined,
