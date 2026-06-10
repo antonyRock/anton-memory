@@ -9,6 +9,7 @@ import {
 import { getOpenAI, chatModel, getChatCompletionParams } from "@/lib/openai";
 import { searchProjects } from "@/lib/projects";
 import { getSupabase } from "@/lib/supabase";
+import { createRuntimeId } from "@/lib/id";
 
 export type Conversation = {
   id: string | number;
@@ -727,7 +728,7 @@ function toResults(
     const base: SearchResultItem = {
       type: resolvedType,
       typeLabel,
-      id: (row.id ?? row.conversation_id ?? crypto.randomUUID()) as string | number,
+      id: (row.id ?? row.conversation_id ?? createRuntimeId()) as string | number,
       conversationId,
       title,
       snippet: snippet.slice(0, 180)

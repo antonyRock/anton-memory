@@ -32,6 +32,7 @@ import {
   syncChatQueryParam
 } from "@/lib/chat-links";
 import { shareOrCopyText } from "@/lib/copy-to-clipboard";
+import { createRuntimeId } from "@/lib/id";
 import { logClientEvent } from "@/lib/client-log";
 import { isConversationPinned, sortConversationsForSidebar } from "@/lib/chat-pins";
 import type { FileNavItem } from "@/lib/file-nav-shared";
@@ -142,7 +143,7 @@ const VOICE_REVIEW_PREF_KEY = "reviewVoiceBeforeSend";
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 420;
 const DEFAULT_SIDEBAR_WIDTH = 280;
-const SCROLL_BOTTOM_THRESHOLD = 96;
+const SCROLL_BOTTOM_THRESHOLD = 200;
 
 function readReplyFromMetadata(metadata?: Record<string, unknown>) {
   const reply = metadata?.reply_to;
@@ -1449,6 +1450,13 @@ export default function Home() {
     );
   }
 
+  function isNearBottom(node?: HTMLDivElement | null) {
+    const target = node ?? messagesRef.current;
+    if (!target) return true;
+    const distanceFromBottom = target.scrollHeight - target.scrollTop - target.clientHeight;
+    return distanceFromBottom <= SCROLL_BOTTOM_THRESHOLD;
+  }
+
   function handleConversationMediaLoad() {
     if (shouldStickToBottom() || shouldAutoScrollRef.current) {
       scrollMessagesToBottom(false);
@@ -1633,7 +1641,7 @@ export default function Home() {
     }
 
     submitInFlightRef.current = true;
-    const submitId = crypto.randomUUID();
+    const submitId = createRuntimeId();
 
     let resolvedVoiceTranscript = voiceTranscript;
     if (!resolvedVoiceTranscript && pendingVoiceTranscriptRef.current) {
@@ -1678,7 +1686,7 @@ export default function Home() {
       replyToRole: activeReply?.role ?? null
     });
 
-    shouldAutoScrollRef.current = true;
+    shouldAutoScrollRef.current = isNearBottom();
     const clientRecentMessages = messages
       .filter((message) => message.role === "user" || message.role === "assistant")
       .slice(-12)
@@ -1875,7 +1883,7 @@ export default function Home() {
       return;
     }
 
-    const batchId = crypto.randomUUID();
+    const batchId = createRuntimeId();
     const pendingAttachments: FileAttachment[] = selectedFiles.map((file) => ({
       batchId,
       fileName: file.name,

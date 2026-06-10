@@ -3,6 +3,7 @@ import {
   VOICE_RECORDING_STORE_NAME,
   buildRecordingFileName
 } from "@/lib/voice-recording";
+import { createRuntimeId } from "@/lib/id";
 
 export type PendingVoiceRecording = {
   id: string;
@@ -63,7 +64,7 @@ export async function savePendingVoiceRecording(input: {
   await clearAllPendingVoiceRecordings();
 
   const recording: PendingVoiceRecording = {
-    id: crypto.randomUUID(),
+    id: createRuntimeId(),
     blob: input.blob,
     mimeType: input.mimeType,
     durationMs: input.durationMs,
