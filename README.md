@@ -9,6 +9,53 @@ PWA-чат «второй мозг»: ChatGPT-подобный интерфей�
 
 ---
 
+## О проекте
+
+**TBrain** — личный «второй мозг»: чат с AI, который **помнит** важное между разговорами.
+
+Обычный ChatGPT забывает контекст после сессии. TBrain сохраняет факты, сущности, задачи и содержимое файлов в Supabase и подмешивает их в следующие ответы. Идея — не просто поболтать, а накапливать знания: проекты, документы, заметки, голосовые мысли — всё в одном месте с памятью.
+
+Для кого: личное использование и небольшой beta-круг (несколько пользователей с изоляцией данных).
+
+---
+
+## Что уже есть
+
+- **Next.js + TypeScript + App Router** — один экран чата, PWA (`manifest.webmanifest`, service worker, установка на телефон).
+- **Supabase Auth (beta)** — вход по email/паролю, logout, изоляция по `user_id`.
+- **Чат** — сообщения, ввод, микрофон, drag & drop файлов, кнопка «в конец чата», fullscreen preview изображений.
+- **Backend API:**
+  - `POST /api/chat` — память → OpenAI → ответ → background memory extraction
+  - `POST /api/transcribe` — голос → текст (OpenAI, fallback-модель, retry)
+  - `GET/POST /api/conversations`, `/api/projects`, `/api/files`, `/api/documents`, `/api/user`
+- **Память** — `facts`, `entities`, `tasks`; retrieval из таблиц + документов; extractor после сообщений.
+- **Проекты** — папки для чатов; файлы внутри проектов; поиск по названию и содержимому файлов.
+- **Excel / PDF / docx** — parsing, parsed data в `documents` (без base64-картинок в JSON).
+- **Sidebar** — проекты, чаты, профиль пользователя, статистика (чаты, слова, активные дни).
+- **Голос** — pending recordings в IndexedDB до успешной транскрибации.
+- **Profiling** — замеры этапов `/api/chat` (`lib/request-profile.ts`).
+
+Таблицы Supabase: `messages`, `facts`, `entities`, `tasks`, `conversations`, `projects`, `documents`, `users`.
+
+---
+
+## Ожидаемая схема Supabase
+
+Базовая схема: `supabase/schema.sql`. Дополнительные миграции по мере развития:
+
+| Файл | Назначение |
+|------|------------|
+| `schema.sql` | базовые таблицы |
+| `conversations_migration.sql` | чаты |
+| `projects_migration.sql` | проекты |
+| `document_memory_migration.sql` | документы и память файлов |
+| `multi_user_migration.sql` | `user_id`, profiles, RLS |
+| `multi_user_repair.sql` | repair legacy placeholder user |
+
+Выполняйте в Supabase → SQL Editor. Для beta multi-user после `schema.sql` нужен как минимум `multi_user_migration.sql`.
+
+---
+
 ## Быстрый старт (локально)
 
 ```bash
@@ -193,3 +240,15 @@ node scripts/verify-multi-user.mjs
 - voice input на iPhone требует HTTPS
 - audio recordings хранятся временно до транскрибации
 - multi-user требует проверки на тестовых аккаунтах
+
+---
+
+## Текущие ограничения (beta)
+
+- Retrieval простой: в основном последние записи из таблиц памяти, без сложного semantic search.
+- Extractor не дедуплицирует память агрессивно.
+- Экспорт/import памяти ещё не реализованы.
+- RLS подготовлен в SQL, но финальное включение — после регрессии `user_id` filtering.
+- Голос и микрофон на iPhone только по HTTPS.
+
+Эти ограничения осознанны для beta: сначала рабочий продукт для малого круга пользователей, затем усиление памяти и безопасности.
