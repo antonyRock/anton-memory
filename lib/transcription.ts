@@ -64,6 +64,77 @@ function mapTranscriptionError(error: unknown) {
   return new Error("Не удалось распознать аудио.");
 }
 
+const TRAILING_COMMAND_PATTERNS = [
+  /перевед[иь]\s+на\s+английск(?:ий|ом)\b[.!?…]*$/i,
+  /translate\s+(?:it|this)?\s*(?:to\s+english|into\s+english)\b[.!?…]*$/i,
+  /сделай\s+кратко\b[.!?…]*$/i,
+  /кратк(?:о|ий)\s+итог\b[.!?…]*$/i,
+  /напомни\s+завтра\b[.!?…]*$/i
+] as const;
+
+function normalizeForMatch(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/[«»"']/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function preserveTrailingCommand(rawTranscript: string, cleanedTranscript: string) {
+  const rawTrimmed = rawTranscript.trim();
+  const cleanedTrimmed = cleanedTranscript.trim();
+
+  for (const pattern of TRAILING_COMMAND_PATTERNS) {
+    const match = rawTrimmed.match(pattern);
+    const command = match?.[0]?.trim();
+    if (!command) continue;
+
+    const cleanedNormalized = normalizeForMatch(cleanedTrimmed);
+    const commandNormalized = normalizeForMatch(command);
+    if (cleanedNormalized.includes(commandNormalized)) {
+      return cleanedTrimmed;
+    }
+
+    const separator = /[.!?…]$/.test(cleanedTrimmed) ? " " : ". ";
+    return `${cleanedTrimmed}${separator}${command}`;
+  }
+
+  return cleanedTrimmed;
+}
+
+function getWordTokens(value: string) {
+  return value
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .match(/[a-zа-я0-9]+/gi) ?? [];
+}
+
+function shouldFallbackToRawTranscript(rawTranscript: string, cleanedTranscript: string) {
+  const rawTokens = getWordTokens(rawTranscript);
+  const cleanedTokens = getWordTokens(cleanedTranscript);
+
+  if (rawTokens.length === 0 || cleanedTokens.length === 0) return true;
+
+  const cleanedCounts = new Map<string, number>();
+  for (const token of cleanedTokens) {
+    cleanedCounts.set(token, (cleanedCounts.get(token) ?? 0) + 1);
+  }
+
+  let kept = 0;
+  for (const token of rawTokens) {
+    const count = cleanedCounts.get(token) ?? 0;
+    if (count > 0) {
+      cleanedCounts.set(token, count - 1);
+      kept += 1;
+    }
+  }
+
+  const keptRatio = kept / rawTokens.length;
+  const minAcceptableRatio = 0.92;
+  return keptRatio < minAcceptableRatio;
+}
+
 async function createTranscription(file: File, model: string) {
   const transcription = await getOpenAI().audio.transcriptions.create({
     file,
@@ -108,17 +179,39 @@ export async function transcribeAudioWithCleanup(file: File): Promise<Transcript
   const cleanupMs = Date.now() - cleanupStartedAt;
 
   if (transcriptStatus === "cleaned" && cleanedTranscript) {
+    const finalCleanedTranscript = preserveTrailingCommand(rawTranscript, cleanedTranscript);
+    if (shouldFallbackToRawTranscript(rawTranscript, finalCleanedTranscript)) {
+      logTranscriptQuality({
+        rawTranscriptLength: rawTranscript.length,
+        cleanedTranscriptLength: finalCleanedTranscript.length,
+        appliedCorrectionsCount: appliedCorrections.length,
+        transcriptStatus: "cleanup_failed"
+      });
+
+      return {
+        text: rawTranscript,
+        rawTranscript,
+        cleanedTranscript: null,
+        appliedCorrections: [],
+        transcriptStatus: "cleanup_failed",
+        profile: {
+          sttMs,
+          cleanupMs
+        }
+      };
+    }
+
     logTranscriptQuality({
       rawTranscriptLength: rawTranscript.length,
-      cleanedTranscriptLength: cleanedTranscript.length,
+      cleanedTranscriptLength: finalCleanedTranscript.length,
       appliedCorrectionsCount: appliedCorrections.length,
       transcriptStatus: "cleaned"
     });
 
     return {
-      text: cleanedTranscript,
+      text: finalCleanedTranscript,
       rawTranscript,
-      cleanedTranscript,
+      cleanedTranscript: finalCleanedTranscript,
       appliedCorrections,
       transcriptStatus: "cleaned",
       profile: {

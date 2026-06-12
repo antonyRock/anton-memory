@@ -527,6 +527,93 @@ export function mergeShortTermContext(
   return merged.slice(-12);
 }
 
+export async function getConversationLinksContext(
+  conversationId?: string | number,
+  options: { maxMessages?: number; maxLinks?: number } = {}
+) {
+  if (!conversationId || String(conversationId) === "legacy") return "";
+
+  const supabase = getSupabase();
+  const maxMessages = options.maxMessages ?? 300;
+  const maxLinks = options.maxLinks ?? 40;
+  const { data, error } = await supabase
+    .from("messages")
+    .select("content")
+    .eq("user_id", getCurrentUserId())
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false })
+    .limit(maxMessages);
+
+  if (error) {
+    console.error("Could not load conversation links:", error.message);
+    return "";
+  }
+
+  const links = extractLinksFromMessages(
+    (data ?? []).map((message) => ({
+      role: "message",
+      content: String(message.content ?? "")
+    })),
+    maxLinks
+  );
+
+  if (links.length === 0) return "";
+
+  return [
+    `Links found in current chat #${conversationId}:`,
+    ...links.map((link, index) => `${index + 1}. ${link}`)
+  ].join("\n");
+}
+
+export async function getGlobalLinksContext(options: {
+  excludeConversationId?: string | number;
+  maxMessages?: number;
+  maxLinks?: number;
+} = {}) {
+  const supabase = getSupabase();
+  const maxMessages = options.maxMessages ?? 1000;
+  const maxLinks = options.maxLinks ?? 80;
+  const { data, error } = await supabase
+    .from("messages")
+    .select("conversation_id, content")
+    .eq("user_id", getCurrentUserId())
+    .order("created_at", { ascending: false })
+    .limit(maxMessages);
+
+  if (error) {
+    console.error("Could not load global links:", error.message);
+    return "";
+  }
+
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  const urlPattern = /https?:\/\/[^\s<>"')\]]+/gi;
+  const excludedConversationId =
+    options.excludeConversationId != null ? String(options.excludeConversationId) : null;
+
+  for (const row of data ?? []) {
+    const conversationId =
+      row.conversation_id != null && String(row.conversation_id).trim()
+        ? String(row.conversation_id)
+        : null;
+    if (excludedConversationId && conversationId === excludedConversationId) continue;
+
+    const content = String(row.content ?? "");
+    for (const match of content.match(urlPattern) ?? []) {
+      const link = match.trim().replace(/[),.;!?]+$/g, "");
+      if (!link || seen.has(link)) continue;
+      seen.add(link);
+      lines.push(`${link}${conversationId ? ` (chat ${conversationId})` : ""}`);
+      if (lines.length >= maxLinks) {
+        return [`Links found in all chats:`, ...lines].join("\n");
+      }
+    }
+  }
+
+  if (lines.length === 0) return "";
+  return [`Links found in all chats:`, ...lines].join("\n");
+}
+
 export async function getReferencedConversationsContext(ids: Array<string | number>) {
   if (ids.length === 0) return "";
 
@@ -547,18 +634,48 @@ export async function getReferencedConversationsContext(ids: Array<string | numb
     ]);
 
     const title = String(conversation?.title ?? `Чат ${id}`).trim() || `Чат ${id}`;
-    const excerpt = messages
-      .filter((message) => message.role === "user" || message.role === "assistant")
+    const dialogMessages = messages.filter(
+      (message) => message.role === "user" || message.role === "assistant"
+    );
+    const excerpt = dialogMessages
       .slice(-16)
       .map((message) => `${message.role}: ${String(message.content ?? "").slice(0, 800)}`)
       .join("\n");
+    const extractedLinks = extractLinksFromMessages(dialogMessages, 24);
+    const linksBlock =
+      extractedLinks.length > 0
+        ? `\n\nСсылки, найденные в этом чате:\n${extractedLinks.map((link) => `- ${link}`).join("\n")}`
+        : "";
+    const excerptWithLinks = `${excerpt}${linksBlock}`.trim();
 
-    if (!excerpt) continue;
+    if (!excerptWithLinks) continue;
 
-    blocks.push(`Чат #${id} «${title}»:\n${excerpt}`);
+    blocks.push(`Чат #${id} «${title}»:\n${excerptWithLinks}`);
   }
 
   return blocks.join("\n\n---\n\n");
+}
+
+function extractLinksFromMessages(
+  messages: Array<{ role: string; content: string }>,
+  limit = 24
+) {
+  const urlPattern = /https?:\/\/[^\s<>"')\]]+/gi;
+  const seen = new Set<string>();
+  const links: string[] = [];
+
+  for (const message of messages) {
+    const content = String(message.content ?? "");
+    for (const match of content.match(urlPattern) ?? []) {
+      const normalized = match.trim().replace(/[),.;!?]+$/g, "");
+      if (!normalized || seen.has(normalized)) continue;
+      seen.add(normalized);
+      links.push(normalized);
+      if (links.length >= limit) return links;
+    }
+  }
+
+  return links;
 }
 
 export async function touchConversation(conversationId?: string | number) {

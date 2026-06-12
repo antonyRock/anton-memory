@@ -14,7 +14,21 @@ export type UserStats = {
   days: number;
 };
 
+export type UserKnowledgeStats = {
+  links: number;
+  documents: number;
+  facts: number;
+  entities: number;
+  tasks: number;
+};
+
 export const DEFAULT_USER_ID = "f224756a-d4ae-4f09-a315-9991c03ebe84";
+const KNOWLEDGE_STATS_CACHE_TTL_MS = 60_000;
+const KNOWLEDGE_LINK_SCAN_LIMIT = 1200;
+const knowledgeStatsCache = new Map<
+  string,
+  { value: UserKnowledgeStats; expiresAt: number }
+>();
 
 export function getDefaultUserProfile(): UserProfile {
   return {
@@ -273,4 +287,144 @@ export async function getUserStats(userId = DEFAULT_USER_ID): Promise<UserStats>
     console.error("Could not load user stats:", error);
     return { chats: 0, words: 0, days: 0 };
   }
+}
+
+export async function getUserKnowledgeStats(userId = DEFAULT_USER_ID): Promise<UserKnowledgeStats> {
+  const cached = knowledgeStatsCache.get(userId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value;
+  }
+
+  const empty: UserKnowledgeStats = {
+    links: 0,
+    documents: 0,
+    facts: 0,
+    entities: 0,
+    tasks: 0
+  };
+
+  const [documentsCount, factsCount, entitiesCount, tasksCount, links] = await Promise.all([
+    safeKnowledgeCount("documents", userId),
+    safeKnowledgeCount("facts", userId),
+    safeKnowledgeCount("entities", userId),
+    safeKnowledgeCount("tasks", userId),
+    safeKnowledgeLinksCount(userId)
+  ]);
+
+  const value = {
+    links,
+    documents: documentsCount,
+    facts: factsCount,
+    entities: entitiesCount,
+    tasks: tasksCount
+  };
+  knowledgeStatsCache.set(userId, {
+    value,
+    expiresAt: Date.now() + KNOWLEDGE_STATS_CACHE_TTL_MS
+  });
+  return value;
+}
+
+async function countRowsForUser(
+  table: "documents" | "facts" | "entities" | "tasks",
+  userId: string
+) {
+  const supabase = getSupabase();
+  const withUser = await supabase
+    .from(table)
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId);
+
+  if (!withUser.error) {
+    const scopedCount = withUser.count ?? 0;
+    if (scopedCount > 0) return scopedCount;
+
+    const legacy = await supabase.from(table).select("id", { count: "exact", head: true });
+    if (!legacy.error) return legacy.count ?? 0;
+    throw new Error(legacy.error.message);
+  }
+
+  if (/user_id/i.test(withUser.error.message)) {
+    const fallback = await supabase.from(table).select("id", { count: "exact", head: true });
+    if (!fallback.error) return fallback.count ?? 0;
+    throw new Error(fallback.error.message);
+  }
+
+  throw new Error(withUser.error.message);
+}
+
+async function collectUniqueLinksForUser(userId: string) {
+  const supabase = getSupabase();
+  const scoped = await collectUniqueLinks(() =>
+    supabase
+      .from("messages")
+      .select("content, created_at")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(KNOWLEDGE_LINK_SCAN_LIMIT)
+  );
+
+  if (scoped.count > 0) return scoped.count;
+  if (scoped.error && !/user_id|timeout/i.test(scoped.error.message)) {
+    throw new Error(scoped.error.message);
+  }
+
+  const legacy = await collectUniqueLinks(() =>
+    supabase
+      .from("messages")
+      .select("content, created_at")
+      .order("created_at", { ascending: false })
+      .limit(KNOWLEDGE_LINK_SCAN_LIMIT)
+  );
+  if (legacy.error) throw new Error(legacy.error.message);
+  return legacy.count;
+}
+
+async function safeKnowledgeCount(
+  table: "documents" | "facts" | "entities" | "tasks",
+  userId: string
+) {
+  try {
+    return await countRowsForUser(table, userId);
+  } catch (error) {
+    console.error(`Could not count ${table}:`, error);
+    return 0;
+  }
+}
+
+async function safeKnowledgeLinksCount(userId: string) {
+  try {
+    return await collectUniqueLinksForUser(userId);
+  } catch (error) {
+    console.error("Could not count links:", error);
+    return 0;
+  }
+}
+
+function extractHttpLinks(value: string) {
+  return (value.match(/https?:\/\/[^\s<>"')\]]+/gi) ?? []).map((item) =>
+    item.trim().replace(/[),.;!?]+$/g, "")
+  );
+}
+
+async function collectUniqueLinks(
+  buildQuery: () => PromiseLike<{
+    data: Array<{ content?: unknown }> | null;
+    error: { message: string } | null;
+  }>
+) {
+  const links = new Set<string>();
+  const result = await buildQuery();
+  if (result.error) {
+    return { count: 0, error: { message: result.error.message } };
+  }
+  const rows = result.data ?? [];
+  for (const row of rows) {
+    const text = String(row.content ?? "");
+    for (const link of extractHttpLinks(text)) {
+      links.add(link);
+    }
+  }
+
+  return { count: links.size, error: null as { message: string } | null };
 }

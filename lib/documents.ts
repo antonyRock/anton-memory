@@ -652,14 +652,10 @@ export async function getDocumentsForMessages(
     if (ids.length > 0) idsFromMetadata.set(String(message.id), ids);
   }
 
-  if (idsFromMetadata.size === 0) {
-    return byMessage;
-  }
-
   const supabase = getSupabase();
   const messageIds = messages.map((message) => Number(message.id)).filter(Number.isFinite);
 
-  const linked = messageIds.length
+  const linked = messageIds.length > 0
     ? await supabase
         .from("message_documents")
         .select("message_id, document_id")
@@ -683,6 +679,10 @@ export async function getDocumentsForMessages(
   }
 
   const allDocumentIds = [...new Set([...docIdsByMessage.values()].flatMap((set) => [...set]))];
+  if (allDocumentIds.length === 0) {
+    return byMessage;
+  }
+
   const attachments = await getDocumentAttachments(allDocumentIds);
   const attachmentById = new Map(attachments.map((attachment) => [String(attachment.id), attachment]));
 
@@ -835,6 +835,69 @@ function buildDocumentSearchTerms(query: string) {
 export async function getImageInputsForVision(ids: Array<string | number>) {
   const imageFiles = await getImageFiles(ids);
   return imageFiles.map((image) => ({
+    fileName: image.fileName,
+    fileType: image.fileType,
+    dataUrl: `data:${image.fileType};base64,${image.buffer.toString("base64")}`
+  }));
+}
+
+export async function getRecentConversationImageInputs(
+  conversationId: string | number,
+  options: { messageLimit?: number; imageLimit?: number } = {}
+) {
+  if (!conversationId || String(conversationId) === "legacy") return [];
+
+  const supabase = getSupabase();
+  const messageLimit = options.messageLimit ?? 80;
+  const imageLimit = options.imageLimit ?? 4;
+  const { data: messages, error: messagesError } = await supabase
+    .from("messages")
+    .select("id, metadata")
+    .eq("user_id", getCurrentUserId())
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: false })
+    .limit(messageLimit);
+
+  if (messagesError) {
+    console.error("Conversation image lookup failed:", messagesError.message);
+    return [];
+  }
+
+  const messageIds = (messages ?? [])
+    .map((message) => Number(message.id))
+    .filter((messageId) => Number.isFinite(messageId));
+  const documentIds = new Set<string>();
+
+  for (const message of messages ?? []) {
+    const metadata = normalizeMetadata(message.metadata);
+    const ids = Array.isArray(metadata.document_ids) ? metadata.document_ids : [];
+    const generatedId = metadata.generated_document_id;
+    for (const id of [...ids, ...(generatedId != null ? [generatedId] : [])]) {
+      if (id == null || String(id) === "") continue;
+      documentIds.add(String(id));
+    }
+  }
+
+  if (messageIds.length > 0) {
+    const { data: links, error: linksError } = await supabase
+      .from("message_documents")
+      .select("document_id")
+      .in("message_id", messageIds);
+
+    if (linksError) {
+      console.error("Message document link lookup failed:", linksError.message);
+    } else {
+      for (const link of links ?? []) {
+        if (link.document_id == null || String(link.document_id) === "") continue;
+        documentIds.add(String(link.document_id));
+      }
+    }
+  }
+
+  if (documentIds.size === 0) return [];
+
+  const imageFiles = await getImageFiles([...documentIds].slice(0, imageLimit * 6));
+  return imageFiles.slice(0, imageLimit).map((image) => ({
     fileName: image.fileName,
     fileType: image.fileType,
     dataUrl: `data:${image.fileType};base64,${image.buffer.toString("base64")}`

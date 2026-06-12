@@ -83,7 +83,12 @@ button {
   left: 0;
   width: 2px;
   height: 100%;
-  background: linear-gradient(180deg, var(--accent) 0%, rgba(255, 221, 45, 0.08) 55%, transparent 100%);
+  background: linear-gradient(
+    180deg,
+    rgba(255, 255, 255, 0.14) 0%,
+    rgba(255, 255, 255, 0.06) 55%,
+    transparent 100%
+  );
   pointer-events: none;
 }
 
@@ -158,9 +163,9 @@ button {
   margin-bottom: 2px;
   color: var(--text);
   font-weight: 600;
-  background: var(--tbank-yellow-soft);
-  border: 1px solid rgba(255, 221, 45, 0.22);
-  box-shadow: 0 0 20px rgba(255, 221, 45, 0.06);
+  background: rgba(255, 221, 45, 0.15);
+  border: 1px solid rgba(255, 221, 45, 0.3);
+  box-shadow: 0 0 14px rgba(255, 221, 45, 0.04);
 }
 
 .sidebar-action-new-chat:hover {
@@ -175,15 +180,19 @@ button {
   border-radius: 8px;
   display: grid;
   place-items: center;
-  color: var(--accent-on);
-  background: var(--accent);
-  box-shadow: 0 0 16px var(--tbank-yellow-glow);
+  color: #c9cfd8;
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .sidebar-divider {
   height: 1px;
   margin: 8px 0 10px;
-  background: linear-gradient(90deg, rgba(255, 221, 45, 0.35), rgba(255, 221, 45, 0.08) 55%, transparent);
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.16),
+    rgba(255, 255, 255, 0.06) 55%,
+    transparent
+  );
 }
 
 .sidebar-divider-scroll {
@@ -209,12 +218,12 @@ button {
 }
 
 .sidebar-inline-action:hover {
-  color: var(--accent);
-  background: var(--tbank-yellow-soft);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .sidebar-inline-action svg {
-  color: var(--accent);
+  color: var(--muted);
 }
 
 .sidebar-section-block {
@@ -228,11 +237,13 @@ button {
 }
 
 .project-folder {
-  border-radius: 9px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .project-folder.is-drop-target {
-  background: var(--tbank-yellow-soft);
+  background: rgba(255, 221, 45, 0.1);
   outline: 1px dashed rgba(255, 221, 45, 0.45);
 }
 
@@ -240,12 +251,12 @@ button {
   display: flex;
   align-items: center;
   gap: 2px;
-  min-height: 36px;
+  min-height: 38px;
 }
 
 .project-folder-chevron,
 .project-folder-open {
-  min-height: 36px;
+  min-height: 38px;
   border: 0;
   border-radius: 9px;
   display: flex;
@@ -269,7 +280,8 @@ button {
 .project-folder-open {
   flex: 1;
   min-width: 0;
-  padding: 0 8px;
+  padding: 0 10px;
+  font-weight: 600;
 }
 
 .project-folder-open span {
@@ -280,26 +292,26 @@ button {
 
 .project-folder-chevron:hover,
 .project-folder-open:hover {
-  background: var(--tbank-yellow-soft);
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .project-folder-rename-input {
   flex: 1;
   min-width: 0;
   height: 28px;
-  border: 1px solid rgba(255, 221, 45, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.24);
   border-radius: 7px;
   padding: 0 8px;
   color: var(--text);
   background: var(--tbank-panel-strong);
   font-size: inherit;
   outline: none;
-  box-shadow: 0 0 0 1px rgba(255, 221, 45, 0.12);
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04);
 }
 
 .project-folder-rename-input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px var(--tbank-yellow-glow);
+  border-color: rgba(255, 221, 45, 0.5);
+  box-shadow: 0 0 0 2px rgba(255, 221, 45, 0.12);
 }
 
 .sidebar-inline-create-project {
@@ -314,8 +326,8 @@ button {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  color: var(--accent);
-  filter: drop-shadow(0 0 8px var(--tbank-yellow-glow));
+  color: #aeb5c0;
+  filter: none;
 }
 
 .project-folder-menu-wrap {
@@ -390,9 +402,12 @@ button {
 }
 
 .project-folder .conversation-item.nested {
-  width: calc(100% - 12px);
-  margin-left: 12px;
-  padding-left: 22px;
+  width: calc(100% - 18px);
+  margin-left: 18px;
+  min-height: 32px;
+  padding: 7px 12px 7px 18px;
+  font-size: 12.5px;
+  color: #cbd1da;
 }
 
 .project-folder-empty {
@@ -406,7 +421,7 @@ button {
 .conversation-list.is-drop-target {
   border-radius: 9px;
   outline: 1px dashed rgba(255, 221, 45, 0.45);
-  background: var(--tbank-yellow-soft);
+  background: rgba(255, 221, 45, 0.1);
 }
 
 .conversation-item.is-dragging {
@@ -849,12 +864,12 @@ button {
 }
 
 .sidebar-section-toggle svg {
-  color: var(--accent);
+  color: #aeb5c0;
 }
 
 .sidebar-section-toggle:hover {
   color: var(--text);
-  background: var(--tbank-yellow-soft);
+  background: rgba(255, 255, 255, 0.07);
 }
 
 .sidebar-section-toggle:hover .sidebar-section-count {
@@ -894,7 +909,7 @@ button {
   flex-shrink: 0;
   width: 28px;
   height: 28px;
-  border: 1px solid rgba(255, 221, 45, 0.28);
+  border: 1px solid rgba(255, 255, 255, 0.18);
   border-radius: 8px;
   display: grid;
   place-items: center;
@@ -909,14 +924,14 @@ button {
 }
 
 .projects-expand-all-button svg {
-  color: var(--accent);
+  color: #aeb5c0;
 }
 
 .projects-expand-all-button:hover {
   color: var(--text);
-  border-color: rgba(255, 221, 45, 0.55);
-  background: var(--tbank-yellow-soft);
-  box-shadow: 0 0 12px var(--tbank-yellow-glow);
+  border-color: rgba(255, 255, 255, 0.32);
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: none;
 }
 
 .conversation-item,
@@ -980,8 +995,10 @@ button {
 }
 
 .conversation-item.active {
-  background: var(--tbank-yellow-soft);
-  box-shadow: inset 3px 0 0 var(--accent);
+  background: rgba(255, 221, 45, 0.12);
+  box-shadow:
+    inset 3px 0 0 var(--accent),
+    0 0 0 1px rgba(255, 221, 45, 0.22);
 }
 
 .sidebar-section-title {
@@ -1064,11 +1081,11 @@ button {
 }
 
 .chat-context-menu button svg {
-  color: var(--accent);
+  color: #c6ccd6;
 }
 
 .chat-context-menu button:hover {
-  background: var(--tbank-yellow-soft);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .sidebar-backdrop {
@@ -1081,6 +1098,34 @@ button {
 
 .chat-shell.empty.has-active-chat {
   grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.quick-actions {
+  width: min(760px, calc(100vw - 32px));
+  margin: 18px auto 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.quick-action-card {
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  padding: 0 12px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.quick-action-card:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .chat-shell.empty .top-bar {
@@ -1245,7 +1290,7 @@ button {
 
 .chat-title-label:hover {
   color: var(--text);
-  background: rgba(255, 221, 45, 0.08);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .chat-title-rename-input {
@@ -1254,7 +1299,7 @@ button {
   max-width: 100%;
   padding: 1px 6px;
   margin: -1px -6px;
-  border: 1px solid rgba(255, 221, 45, 0.45);
+  border: 1px solid rgba(255, 255, 255, 0.24);
   border-radius: 6px;
   background: rgba(26, 26, 29, 0.96);
   color: var(--text);
@@ -1262,12 +1307,40 @@ button {
   font-size: 12px;
   line-height: 1.2;
   outline: none;
-  box-shadow: 0 0 0 2px rgba(255, 221, 45, 0.12);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.05);
 }
 
 .chat-title-rename-input:focus {
-  border-color: rgba(255, 221, 45, 0.65);
-  box-shadow: 0 0 0 2px rgba(255, 221, 45, 0.18);
+  border-color: rgba(255, 221, 45, 0.5);
+  box-shadow: 0 0 0 2px rgba(255, 221, 45, 0.12);
+}
+
+.quick-actions {
+  width: min(760px, calc(100vw - 32px));
+  margin: 18px auto 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.quick-action-card {
+  min-height: 44px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 12px;
+  padding: 0 12px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.quick-action-card:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .messages-pull-host,
@@ -1825,6 +1898,24 @@ button {
 .composer-wrap.empty {
   padding-bottom: 0;
   background: transparent;
+}
+
+.memory-hint {
+  width: min(760px, calc(100vw - 32px));
+  margin: 0 auto 10px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+  opacity: 0.86;
+}
+
+.memory-hint {
+  width: min(760px, calc(100vw - 32px));
+  margin: 0 auto 10px;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+  opacity: 0.86;
 }
 
 .composer {
@@ -2769,6 +2860,23 @@ button {
     place-items: center center;
     padding-bottom: 0;
     min-height: min(42vh, 360px);
+  }
+
+  .quick-actions {
+    grid-template-columns: 1fr;
+    width: min(520px, calc(100vw - 24px));
+    margin-top: 14px;
+  }
+
+  .quick-action-card {
+    min-height: 42px;
+    font-size: 12.5px;
+  }
+
+  .memory-hint {
+    width: min(520px, calc(100vw - 24px));
+    text-align: left;
+    margin-bottom: 8px;
   }
 
   .messages.empty {

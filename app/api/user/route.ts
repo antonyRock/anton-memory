@@ -1,16 +1,22 @@
 import { NextResponse } from "next/server";
-import { getUserProfile, getUserStats, updateUserDisplayName } from "@/lib/users";
+import {
+  getUserKnowledgeStats,
+  getUserProfile,
+  getUserStats,
+  updateUserDisplayName
+} from "@/lib/users";
 import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
   return handleAuthenticatedRoute(request, async (user) => {
-    const [profile, stats] = await Promise.all([
+    const [profile, stats, knowledgeStats] = await Promise.all([
       getUserProfile(user.id, { email: user.email }),
-      getUserStats(user.id)
+      getUserStats(user.id),
+      getUserKnowledgeStats(user.id)
     ]);
-    return NextResponse.json({ profile, stats });
+    return NextResponse.json({ profile, stats, knowledgeStats });
   });
 }
 

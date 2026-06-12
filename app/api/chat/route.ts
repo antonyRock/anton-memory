@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import {
+  getConversationLinksContext,
+  getGlobalLinksContext,
   getShortTermContext,
   getReferencedConversationsContext,
   mergeShortTermContext,
@@ -11,6 +13,7 @@ import { chatModel, getChatCompletionParams, getOpenAI } from "@/lib/openai";
 import {
   buildDocumentsPromptForChat,
   getImageInputsForVision,
+  getRecentConversationImageInputs,
   linkDocumentsToMessage
 } from "@/lib/documents";
 import {
@@ -33,6 +36,12 @@ import { getCurrentUserId } from "@/lib/current-user";
 
 export const runtime = "nodejs";
 export const maxDuration = 60;
+const LINK_QUERY_PATTERN = /(ссылк|url|urls|сайт|site|http|https|линк|link)/i;
+const LINK_RESOURCE_QUERY_PATTERN =
+  /(покажи|покаж|дай|скинь|кинь|где|нужн|открой|find|show|give|send).*(форм|заказ|терминал|sql|сервис|workspace|forge|helicopter)|(?:форм|заказ|терминал|sql|сервис|workspace|forge|helicopter).*(покажи|покаж|дай|скинь|кинь|где|нужн|открой|find|show|give|send)/i;
+const SAVE_LINK_INTENT_PATTERN =
+  /(запомн|сохрани|зафиксир|добавь в память|remember|save|store|pin).*(ссыл|url|link)|(?:ссыл|url|link).*(запомн|сохрани|зафиксир|remember|save|store|pin)/i;
+const LINK_EXTRACTION_VISION_MODEL = process.env.OPENAI_LINK_EXTRACTION_MODEL ?? "gpt-4o-mini";
 
 export async function POST(request: Request) {
   let userId: string;
@@ -125,7 +134,8 @@ export async function POST(request: Request) {
 
       try {
         const identityQuery = isUserIdentityQuery(userMessage);
-        const [memory, documentsPrompt, imageInputs, dbShortTermMessages, referencedChatsPrompt, storedUserName] =
+        const shouldLookupLinks = needsLinkLookup(userMessage);
+        const [memory, documentsPrompt, imageInputs, dbShortTermMessages, referencedChatsPrompt, storedUserName, conversationLinksPrompt, globalLinksPrompt] =
           await profiler.measure("memoryRetrievalMs", () =>
             Promise.all([
               retrieveMemory(userMessage, conversationId),
@@ -133,9 +143,27 @@ export async function POST(request: Request) {
               getImageInputsForVision(attachedDocumentIds),
               getShortTermContext(conversationId),
               getReferencedConversationsContext(referencedConversationIds),
-              identityQuery ? getStoredUserName() : Promise.resolve(null)
+              identityQuery ? getStoredUserName() : Promise.resolve(null),
+              shouldLookupLinks
+                ? getConversationLinksContext(conversationId)
+                : Promise.resolve(""),
+              shouldLookupLinks
+                ? getGlobalLinksContext({ excludeConversationId: conversationId })
+                : Promise.resolve("")
             ])
           );
+        let imageLinkHints = "";
+        const asksForLinks = shouldLookupLinks;
+        if (asksForLinks && conversationId) {
+          imageLinkHints = await profiler.measure("memoryRetrievalMs", async () => {
+            const conversationImages = await getRecentConversationImageInputs(conversationId, {
+              messageLimit: 120,
+              imageLimit: 4
+            });
+            if (conversationImages.length === 0) return "";
+            return await extractUrlsFromImageInputs(conversationImages);
+          });
+        }
 
         const shortTermMessages = mergeShortTermContext(dbShortTermMessages, clientRecentMessages);
         const memoryPrompt = formatMemoryForPrompt(memory);
@@ -220,6 +248,7 @@ export async function POST(request: Request) {
                   "Write plain conversational text. Do not use Markdown asterisks for bold (**like this**) or other Markdown decoration in normal replies. Code blocks are fine only when sharing code.",
                   "Handle writing, ideas, coding, analysis, reasoning, planning, brainstorming, and questions about the user's saved history.",
                   "When the user asks about past chats, documents, or files, use the memory context, referenced chats, and any uploaded file context provided in this request.",
+                  "When the context includes a list of links found in chat history or images, and the user asks for a saved link, return the found link(s) directly. Do not claim links are missing if such list is provided.",
                   "Do not say you cannot remember across sessions, that you forget after a chat ends, or that you have no access to past conversations when relevant data is present in the provided context.",
                   "Do not use generic ChatGPT limitation disclaimers about memory or file access.",
                   "If the answer is not in the provided context, say plainly in the user's language: «Я не нашёл этого в памяти». Do not invent facts, documents, or file contents.",
@@ -258,11 +287,39 @@ export async function POST(request: Request) {
                     }
                   ]
                 : []),
+              ...(imageLinkHints
+                ? [
+                    {
+                      role: "system" as const,
+                      content:
+                        `Potential links extracted from images in this chat:\n${imageLinkHints}\n` +
+                        "If user asks what links were saved/sent, prefer these links and mention when extraction confidence is limited."
+                    }
+                  ]
+                : []),
               ...(referencedChatsPrompt
                 ? [
                     {
                       role: "system" as const,
                       content: `Referenced chats linked by Anton. Use this history when answering about those conversations.\n${referencedChatsPrompt}`
+                    }
+                  ]
+                : []),
+              ...(conversationLinksPrompt
+                ? [
+                    {
+                      role: "system" as const,
+                      content: `Known links from the active chat history.\n${conversationLinksPrompt}`
+                    }
+                  ]
+                : []),
+              ...(globalLinksPrompt
+                ? [
+                    {
+                      role: "system" as const,
+                      content:
+                        `Known links found in other chats.\n${globalLinksPrompt}\n` +
+                        "If the user asks for a saved link and it is present here, return it and mention which chat it came from."
                     }
                   ]
                 : []),
@@ -311,6 +368,16 @@ export async function POST(request: Request) {
             });
             await touchConversation(conversationId);
           });
+          if (SAVE_LINK_INTENT_PATTERN.test(userMessage)) {
+            await profiler.measure("databaseWriteMs", async () => {
+              await saveExtractedMemory(
+                {
+                  facts: extractLinkFactsFromAssistantAnswer(finalAnswer)
+                },
+                userMessageId
+              );
+            });
+          }
 
           scheduleChatPostProcessing({
             userId: getCurrentUserId(),
@@ -420,4 +487,88 @@ function optionalString(value: unknown) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function needsLinkLookup(userMessage: string) {
+  return LINK_QUERY_PATTERN.test(userMessage) || LINK_RESOURCE_QUERY_PATTERN.test(userMessage);
+}
+
+function extractLinkFactsFromAssistantAnswer(answer: string): Array<{ content: string }> {
+  const lines = answer.split(/\r?\n/);
+  const facts: Array<{ content: string }> = [];
+  const seen = new Set<string>();
+  const urlPattern = /(https?:\/\/[^\s<>"')\]]+)/gi;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]?.trim() ?? "";
+    if (!line) continue;
+    const urls = [...line.matchAll(urlPattern)].map((match) => match[1]?.trim()).filter(Boolean) as string[];
+
+    for (const url of urls) {
+      const contextLine = lines[index - 1]?.trim() ?? "";
+      const labelSource = contextLine && !/https?:\/\//i.test(contextLine) ? contextLine : line;
+      const label = labelSource
+        .replace(urlPattern, "")
+        .replace(/^[-*•\d.)\s]+/, "")
+        .replace(/[:\-–—]\s*$/, "")
+        .trim();
+      const content = label ? `Ссылка: ${label} — ${url}` : `Ссылка: ${url}`;
+      if (seen.has(content)) continue;
+      seen.add(content);
+      facts.push({ content });
+    }
+  }
+
+  return facts.slice(0, 12);
+}
+
+async function extractUrlsFromImageInputs(
+  images: Array<{ fileName: string; fileType: string; dataUrl: string }>
+) {
+  if (images.length === 0) return "";
+
+  try {
+    const response = await getOpenAI().chat.completions.create({
+      model: LINK_EXTRACTION_VISION_MODEL,
+      ...getChatCompletionParams({ temperature: 0 }),
+      messages: [
+        {
+          role: "system",
+          content: [
+            "Extract only explicit URLs visible in the provided images.",
+            "Return one URL per line.",
+            "If none are visible, return exactly NONE.",
+            "Do not add explanations, bullets, or markdown."
+          ].join(" ")
+        },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Find visible links (http/https or clear www domains)." },
+            ...images.map((image) => ({
+              type: "image_url" as const,
+              image_url: { url: image.dataUrl }
+            }))
+          ]
+        }
+      ]
+    });
+
+    const raw = response.choices[0]?.message?.content?.trim() ?? "";
+    if (!raw || /^none$/i.test(raw)) return "";
+
+    const links = [
+      ...new Set(
+        raw
+          .split(/\r?\n/)
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .filter((line) => /^(https?:\/\/|www\.)/i.test(line))
+      )
+    ];
+    return links.join("\n");
+  } catch (error) {
+    console.error("Image URL extraction failed:", error);
+    return "";
+  }
 }
