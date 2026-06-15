@@ -15,6 +15,8 @@ type UserProfile = {
 
 type UserStats = {
   chats: number;
+  files: number;
+  images: number;
   words: number;
   days: number;
 };
@@ -27,7 +29,7 @@ type SidebarUserProfileProps = {
 const STATS_CACHE_TTL_MS = 5 * 60 * 1000;
 const NAME_DOUBLE_TAP_MS = 400;
 
-const EMPTY_STATS: UserStats = { chats: 0, words: 0, days: 0 };
+const EMPTY_STATS: UserStats = { chats: 0, files: 0, images: 0, words: 0, days: 0 };
 
 function placeholderProfile(userId: string, email?: string | null): UserProfile {
   const fromEmail = email?.split("@")[0]?.trim();
@@ -52,6 +54,16 @@ function profileInitial(name: string) {
   return trimmed ? trimmed.charAt(0).toUpperCase() : "?";
 }
 
+function normalizeStats(raw?: Partial<UserStats>): UserStats {
+  return {
+    chats: Number(raw?.chats ?? 0),
+    files: Number(raw?.files ?? 0),
+    images: Number(raw?.images ?? 0),
+    words: Number(raw?.words ?? 0),
+    days: Number(raw?.days ?? 0)
+  };
+}
+
 function readStatsCache(userId: string | undefined):
   | {
       stats: UserStats;
@@ -65,7 +77,7 @@ function readStatsCache(userId: string | undefined):
     const parsed = JSON.parse(raw) as { stats?: UserStats; fetchedAt?: number };
     if (!parsed.stats || typeof parsed.fetchedAt !== "number") return null;
     if (Date.now() - parsed.fetchedAt > STATS_CACHE_TTL_MS) return null;
-    return { stats: parsed.stats, fetchedAt: parsed.fetchedAt };
+    return { stats: normalizeStats(parsed.stats), fetchedAt: parsed.fetchedAt };
   } catch {
     return null;
   }
@@ -193,7 +205,7 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
           setProfile(data.profile as UserProfile);
         }
         if (data.stats) {
-          const nextStats = data.stats as UserStats;
+          const nextStats = normalizeStats(data.stats as Partial<UserStats>);
           setStats(nextStats);
           writeStatsCache(userId, nextStats);
         }
@@ -292,7 +304,12 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
           <span className="sidebar-user-tagline">{profile.tagline}</span>
           <span className="sidebar-user-stats">
             Чатов:{" "}
-            <span className="sidebar-user-stat-value">{formatStatNumber(stats.chats)}</span> · Слов:{" "}
+            <span className="sidebar-user-stat-value">{formatStatNumber(stats.chats)}</span> · Файлов:{" "}
+            <span className="sidebar-user-stat-value">{formatStatNumber(stats.files)}</span> · Изображ.:{" "}
+            <span className="sidebar-user-stat-value">{formatStatNumber(stats.images)}</span>
+          </span>
+          <span className="sidebar-user-stats sidebar-user-stats-secondary">
+            Слов:{" "}
             <span className="sidebar-user-stat-value">{formatStatNumber(stats.words)}</span> · Дней:{" "}
             <span className="sidebar-user-stat-value">{formatStatNumber(stats.days)}</span>
           </span>

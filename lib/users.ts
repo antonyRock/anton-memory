@@ -1,4 +1,5 @@
 import { getSupabase } from "@/lib/supabase";
+import { isImageDocument } from "@/lib/mime-types";
 import { countWordsInText } from "@/lib/word-count";
 
 export type UserProfile = {
@@ -10,6 +11,8 @@ export type UserProfile = {
 
 export type UserStats = {
   chats: number;
+  files: number;
+  images: number;
   words: number;
   days: number;
 };
@@ -203,13 +206,23 @@ async function getUserStatsViaRpc(userId: string): Promise<UserStats | null> {
 
   const row = Array.isArray(data) ? data[0] : data;
   if (!row || typeof row !== "object") {
-    return { chats: 0, words: 0, days: 0 };
+    return { chats: 0, files: 0, images: 0, words: 0, days: 0 };
   }
 
+  const typed = row as {
+    chats?: number;
+    files?: number;
+    images?: number;
+    words?: number;
+    days?: number;
+  };
+
   return {
-    chats: Number((row as { chats?: number }).chats ?? 0),
-    words: Number((row as { words?: number }).words ?? 0),
-    days: Number((row as { days?: number }).days ?? 0)
+    chats: Number(typed.chats ?? 0),
+    files: Number(typed.files ?? 0),
+    images: Number(typed.images ?? 0),
+    words: Number(typed.words ?? 0),
+    days: Number(typed.days ?? 0)
   };
 }
 
@@ -228,6 +241,51 @@ async function conversationIdsForUser(userId: string) {
   }
 
   throw new Error(withUser.error.message);
+}
+
+function normalizeDocumentMetadata(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value != null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+async function countUserDocuments(userId: string) {
+  const supabase = getSupabase();
+  let files = 0;
+  let images = 0;
+  const pageSize = 500;
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabase
+      .from("documents")
+      .select("file_type, file_name, metadata")
+      .eq("user_id", userId)
+      .order("id", { ascending: true })
+      .range(offset, offset + pageSize - 1);
+
+    if (error) throw new Error(error.message);
+    if (!data?.length) break;
+
+    for (const document of data) {
+      const metadata = normalizeDocumentMetadata(document.metadata);
+      const payload = {
+        fileType: String(document.file_type ?? ""),
+        fileName: String(document.file_name ?? ""),
+        metadata
+      };
+      if (isImageDocument(payload)) {
+        images += 1;
+      } else {
+        files += 1;
+      }
+    }
+
+    if (data.length < pageSize) break;
+    offset += pageSize;
+  }
+
+  return { files, images };
 }
 
 async function getUserStatsFallback(userId: string): Promise<UserStats> {
@@ -275,17 +333,41 @@ async function getUserStatsFallback(userId: string): Promise<UserStats> {
     offset += pageSize;
   }
 
-  return { chats, words, days: dayKeys.size };
+  const { files, images } = await countUserDocuments(userId);
+
+  return { chats, files, images, words, days: dayKeys.size };
+}
+
+async function ensureUserResourceStats(userId: string, stats: UserStats): Promise<UserStats> {
+  if (stats.files > 0 || stats.images > 0) {
+    return stats;
+  }
+
+  try {
+    const { count, error } = await getSupabase()
+      .from("documents")
+      .select("id", { count: "exact", head: true })
+      .eq("user_id", userId);
+
+    if (error || (count ?? 0) === 0) {
+      return stats;
+    }
+  } catch {
+    return stats;
+  }
+
+  const resources = await countUserDocuments(userId);
+  return { ...stats, ...resources };
 }
 
 export async function getUserStats(userId = DEFAULT_USER_ID): Promise<UserStats> {
   try {
     const viaRpc = await getUserStatsViaRpc(userId);
-    if (viaRpc) return viaRpc;
-    return await getUserStatsFallback(userId);
+    const base = viaRpc ?? (await getUserStatsFallback(userId));
+    return await ensureUserResourceStats(userId, base);
   } catch (error) {
     console.error("Could not load user stats:", error);
-    return { chats: 0, words: 0, days: 0 };
+    return { chats: 0, files: 0, images: 0, words: 0, days: 0 };
   }
 }
 

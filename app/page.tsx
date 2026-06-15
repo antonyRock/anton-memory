@@ -27,6 +27,16 @@ import { SidebarConversationItem } from "@/components/SidebarConversationItem";
 import { ProjectNavigator } from "@/components/ProjectNavigator";
 import { ObsidianBackground } from "@/components/ObsidianBackground";
 import { WelcomeRotatingText } from "@/components/WelcomeRotatingText";
+import { AuthenticatedImage } from "@/components/AuthenticatedImage";
+import {
+  isImageAttachment,
+  normalizeClientAttachment,
+  resolveAttachmentDownloadSources,
+  resolveAttachmentPreviewUrl
+} from "@/lib/attachment-client";
+import { downloadClientAttachment } from "@/lib/attachment-download";
+import { sanitizeDownloadFileName } from "@/lib/download-filename";
+import { ImagePreviewModal } from "@/components/ImagePreviewModal";
 import {
   buildChatUrl,
   syncChatQueryParam
@@ -53,6 +63,7 @@ import {
   ChevronRight,
   ChevronsDown,
   ChevronsUp,
+  Download,
   FileSpreadsheet,
   FileText,
   GripVertical,
@@ -137,13 +148,20 @@ type SearchResult = {
 
 type LibraryView = "settings" | null;
 type MessageSubmitSource = "form" | "enter" | "voice";
+type ChatMode = "fast" | "smart" | "analytics";
 
 const DEFAULT_CHAT_TITLE = "Новый чат";
 const VOICE_REVIEW_PREF_KEY = "reviewVoiceBeforeSend";
+const CHAT_MODE_PREF_KEY = "chatMode";
 const MIN_SIDEBAR_WIDTH = 240;
 const MAX_SIDEBAR_WIDTH = 420;
 const DEFAULT_SIDEBAR_WIDTH = 280;
 const SCROLL_BOTTOM_THRESHOLD = 200;
+const CHAT_MODE_OPTIONS: Array<{ value: ChatMode; label: string }> = [
+  { value: "fast", label: "Быстро" },
+  { value: "smart", label: "Умно" },
+  { value: "analytics", label: "Аналитика" }
+];
 const QUICK_ACTION_PROMPTS = [
   "Какие ссылки я сохранил?",
   "Что ты помнишь обо мне?",
@@ -157,7 +175,7 @@ function readReplyFromMetadata(metadata?: Record<string, unknown>) {
   const role = (reply as { role?: string }).role;
   const content = String((reply as { content?: string }).content ?? "").trim();
   if ((role !== "user" && role !== "assistant") || !content) return undefined;
-  return { role, content };
+  return { role: role as "user" | "assistant", content };
 }
 
 function beginReplyToMessage(
@@ -191,7 +209,9 @@ export default function Home() {
   const [projectsCollapsed, setProjectsCollapsed] = useState(false);
   const [libraryView, setLibraryView] = useState<LibraryView>(null);
   const [activeProjectId, setActiveProjectId] = useState<string | number | null>(null);
+  const [projectNavigatorTab, setProjectNavigatorTab] = useState<"chats" | "files" | "images">("chats");
   const [showChatFilesPanel, setShowChatFilesPanel] = useState(false);
+  const [chatFilesPanelKind, setChatFilesPanelKind] = useState<"files" | "images">("files");
   const [isDragOver, setIsDragOver] = useState(false);
   const dragDepthRef = useRef(0);
   const [activeConversationId, setActiveConversationId] = useState<string | number | null>(null);
@@ -205,6 +225,7 @@ export default function Home() {
   const [activeMatchIndex, setActiveMatchIndex] = useState(0);
   const [input, setInput] = useState("");
   const [reviewVoiceBeforeSend, setReviewVoiceBeforeSend] = useState(false);
+  const [chatMode, setChatMode] = useState<ChatMode>("smart");
   const pendingVoiceTranscriptRef = useRef<VoiceTranscriptMeta | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
@@ -215,7 +236,6 @@ export default function Home() {
   const [attachments, setAttachments] = useState<FileAttachment[]>([]);
   const [previewImage, setPreviewImage] = useState<FileAttachment | null>(null);
   const [note, setNote] = useState("Готово");
-  const [welcomeAnimationKey, setWelcomeAnimationKey] = useState(0);
   const [replyTo, setReplyTo] = useState<ReplyTarget | null>(null);
   const [isRenamingChat, setIsRenamingChat] = useState(false);
   const [renameChatValue, setRenameChatValue] = useState("");
@@ -239,7 +259,7 @@ export default function Home() {
   const submitInFlightRef = useRef(false);
   const activeConversationIdRef = useRef<string | number | null>(null);
   activeConversationIdRef.current = activeConversationId;
-  const { authFetch, authUrl } = useAuthFetch();
+  const { authFetch, authUrl, accessToken } = useAuthFetch();
   const {
     isRecording,
     recordingDurationLabel,
@@ -319,6 +339,20 @@ export default function Home() {
     projects.length > 0 &&
     projects.every((project) => expandedProjectIds[String(project.id)] === true);
   const showProjectView = activeProjectId != null && !activeConversationId;
+  const showWelcomeEmpty =
+    !hasMessages &&
+    !showProjectView &&
+    !libraryView &&
+    !(isLoadingHistory && activeConversationId != null);
+  const showHistoryEmptyState =
+    !hasMessages &&
+    !showProjectView &&
+    !libraryView &&
+    activeConversationId != null &&
+    (isLoadingHistory || historyLoadError != null);
+  const messagesSurfaceKey = hasMessages
+    ? String(activeConversationId ?? activeProjectId ?? "chat")
+    : "empty-welcome";
   const activeChatTitle = activeConversation
     ? (() => {
         const list = activeConversation.project_id
@@ -363,6 +397,10 @@ export default function Home() {
     }
 
     setReviewVoiceBeforeSend(window.localStorage.getItem(VOICE_REVIEW_PREF_KEY) === "true");
+    const savedChatMode = window.localStorage.getItem(CHAT_MODE_PREF_KEY);
+    if (savedChatMode === "fast" || savedChatMode === "smart" || savedChatMode === "analytics") {
+      setChatMode(savedChatMode);
+    }
 
     prefsHydratedRef.current = true;
     void bootstrap();
@@ -851,6 +889,48 @@ export default function Home() {
     }
   }
 
+  async function deleteChatById(conversationId: string | number) {
+    const conversation = conversations.find((item) => String(item.id) === String(conversationId));
+    const title = conversationTitle(
+      conversation ?? { title: null },
+      conversations,
+      0
+    );
+
+    if (
+      !window.confirm(
+        `Удалить чат «${title}»? Сообщения будут удалены без возможности восстановления.`
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const response = await authFetch(`/api/conversations/${conversationId}`, {
+        method: "DELETE"
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error ?? "Не удалось удалить чат");
+
+      messagesCacheRef.current.delete(String(conversationId));
+      setConversations((current) =>
+        current.filter((item) => String(item.id) !== String(conversationId))
+      );
+      setSearchResults((current) =>
+        current.filter((item) => String(item.conversationId) !== String(conversationId))
+      );
+
+      if (String(activeConversationId) === String(conversationId)) {
+        resetToNewChat();
+      }
+
+      setChatContextMenu(null);
+      setNote("Чат удалён");
+    } catch (error) {
+      setNote(error instanceof Error ? error.message : "Не удалось удалить чат");
+    }
+  }
+
   function beginChatRename() {
     if (!activeConversationId || !activeConversation) return;
     setRenameChatValue(normalizeConversationTitle(activeConversation.title));
@@ -1081,22 +1161,16 @@ export default function Home() {
             throw new Error(message);
           }
 
-          setMessages(
-            (data.messages ?? []).map(
-              (message: {
+          setMessages((previous) =>
+            mergeLoadedChatMessages(
+              previous,
+              (data.messages ?? []) as Array<{
                 role: "user" | "assistant";
                 content: string;
-                attachments?: FileAttachment[];
+                attachments?: Array<Record<string, unknown>>;
                 imageUrl?: string | null;
                 metadata?: Record<string, unknown>;
-              }) => ({
-                role: message.role,
-                content: message.content,
-                attachments: message.attachments ?? [],
-                imageUrl: message.imageUrl ?? undefined,
-                metadata: message.metadata ?? undefined,
-                replyTo: readReplyFromMetadata(message.metadata)
-              })
+              }>
             )
           );
           shouldAutoScrollRef.current = true;
@@ -1178,7 +1252,6 @@ export default function Home() {
     setNote(DEFAULT_CHAT_TITLE);
     setHistoryLoadError(null);
     setIsLoadingHistory(false);
-    setWelcomeAnimationKey((current) => current + 1);
     window.localStorage.removeItem("activeConversationId");
     syncChatQueryParam(null);
   }
@@ -1190,6 +1263,14 @@ export default function Home() {
       setNote(next ? "Голос будет вставляться для проверки" : "Голос отправляется сразу");
       return next;
     });
+  }
+
+  function handleChatModeChange(nextValue: string) {
+    if (nextValue !== "fast" && nextValue !== "smart" && nextValue !== "analytics") return;
+    setChatMode(nextValue);
+    window.localStorage.setItem(CHAT_MODE_PREF_KEY, nextValue);
+    const option = CHAT_MODE_OPTIONS.find((item) => item.value === nextValue);
+    setNote(`Режим: ${option?.label ?? nextValue}`);
   }
 
   async function copyChatLink(conversationId: string | number) {
@@ -1287,13 +1368,18 @@ export default function Home() {
     closeSidebarIfMobile();
   }
 
-  function openProject(projectId: string | number) {
+  function openProject(
+    projectId: string | number,
+    tab: "chats" | "files" | "images" = "chats"
+  ) {
     cancelPendingMessageLoad();
     pendingNewChatProjectIdRef.current = null;
     creatingChatRef.current = false;
     shouldAutoScrollRef.current = false;
     resetMessagesScroll();
+    setProjectNavigatorTab(tab);
     setActiveProjectId(projectId);
+    setExpandedProjectIds((current) => ({ ...current, [String(projectId)]: true }));
     setActiveConversationId(null);
     setMessages([]);
     setLibraryView(null);
@@ -1306,16 +1392,37 @@ export default function Home() {
 
   function closeProjectView() {
     setActiveProjectId(null);
+    setProjectNavigatorTab("chats");
   }
 
-  function openChatFilesPanel() {
+  function openChatFilesPanel(kind: "files" | "images" = "files") {
     if (!activeConversationId) return;
+    setChatFilesPanelKind(kind);
     setShowChatFilesPanel(true);
     closeSidebarIfMobile();
   }
 
   function handleOpenNavFile(file: FileNavItem) {
     void openFileAttachment(file);
+  }
+
+  function handleDownloadNavFile(file: FileNavItem) {
+    void downloadAttachment(
+      normalizeClientAttachment(file as unknown as Record<string, unknown>)
+    );
+  }
+
+  async function downloadAttachment(attachment: FileAttachment) {
+    try {
+      setNote(`Скачиваю ${attachment.fileName}...`);
+      await downloadClientAttachment(
+        normalizeClientAttachment(attachment as unknown as Record<string, unknown>),
+        { authFetch, authUrl }
+      );
+      setNote("Файл скачан");
+    } catch {
+      setNote("Не удалось скачать файл");
+    }
   }
 
   async function openFileAttachment(attachment: {
@@ -1328,26 +1435,16 @@ export default function Home() {
     metadata?: Record<string, unknown>;
     conversationId?: string | number | null;
   }) {
-    if (isImage(attachment as FileAttachment)) {
-      const imageUrl =
-        attachment.fullUrl ??
-        attachment.previewUrl ??
-        (attachment.id != null ? buildDocumentDownloadUrl(attachment.id, true) : null);
-      if (imageUrl) {
-        setPreviewImage({
-          id: attachment.id,
-          fileName: attachment.fileName,
-          fileType: attachment.fileType,
-          fileSize: attachment.fileSize ?? 0,
-          fullUrl: imageUrl,
-          previewUrl: imageUrl,
-          metadata: attachment.metadata
-        });
+    if (isImageAttachment(attachment as FileAttachment)) {
+      const normalized = normalizeClientAttachment(attachment as unknown as Record<string, unknown>);
+      if (resolveAttachmentPreviewUrl(normalized)) {
+        setPreviewImage(normalized);
         return;
       }
     }
 
-    if (attachment.id == null) {
+    const normalized = normalizeClientAttachment(attachment as unknown as Record<string, unknown>);
+    if (resolveAttachmentDownloadSources(normalized).length === 0) {
       if (attachment.conversationId != null) {
         setActiveProjectId(null);
         setShowChatFilesPanel(false);
@@ -1359,21 +1456,23 @@ export default function Home() {
       return;
     }
 
-    const inline = canOpenDocumentInline(attachment.fileName, attachment.fileType);
-    const url = authUrl(buildDocumentDownloadUrl(attachment.id, inline));
+    const inline = canOpenDocumentInline(normalized.fileName, normalized.fileType);
 
-    if (isMobileViewport()) {
-      setNote(inline ? "Открываю файл..." : `Скачиваю ${attachment.fileName}...`);
-      try {
-        await downloadDocumentViaBlob(url, attachment.fileName, inline);
-        setNote(inline ? "Файл открыт" : "Файл скачан");
-      } catch {
-        setNote("Не удалось открыть файл");
+    try {
+      if (inline && !isMobileViewport() && normalized.id != null) {
+        setNote("Открываю файл...");
+        const url = authUrl(buildDocumentDownloadUrl(normalized.id, true));
+        await downloadDocumentViaBlob(url, normalized.fileName, true, authFetch);
+        setNote("Файл открыт");
+        return;
       }
-      return;
-    }
 
-    triggerDocumentDownloadLink(url, attachment.fileName, inline);
+      setNote(`Скачиваю ${normalized.fileName}...`);
+      await downloadClientAttachment(normalized, { authFetch, authUrl });
+      setNote("Файл скачан");
+    } catch {
+      setNote("Не удалось скачать файл");
+    }
   }
 
   function openConversation(conversationId: string | number | null | undefined) {
@@ -1701,7 +1800,7 @@ export default function Home() {
     const readyFiles = files.filter((file) => file.status === "ready" && file.id);
     const readyDocumentIds = readyFiles.map((file) => file.id);
     const displayText = trimmed || files.map((file) => file.fileName).join(", ");
-    const hasImageAttachment = readyFiles.some((file) => file.fileType.startsWith("image/"));
+    const hasImageAttachment = readyFiles.some((file) => isImageAttachment(file));
     const imageIntent =
       shouldGenerateImage(trimmed) || (hasImageAttachment && shouldEditImage(trimmed));
     const activeReply = replyTo;
@@ -1729,7 +1828,9 @@ export default function Home() {
       {
         role: "user",
         content: displayText,
-        attachments: readyFiles,
+        attachments: readyFiles.map((file) =>
+          normalizeClientAttachment(file as unknown as Record<string, unknown>)
+        ),
         replyTo: activeReply ?? undefined
       },
       { role: "assistant", content: "" }
@@ -1757,6 +1858,7 @@ export default function Home() {
                 message: trimmed || "Посмотри прикреплённые файлы.",
                 documentIds: readyDocumentIds,
                 conversationId,
+                chatMode,
                 recentMessages: clientRecentMessages,
                 replyTo: activeReply ?? undefined,
                 ...(resolvedVoiceTranscript
@@ -1800,6 +1902,7 @@ export default function Home() {
 
       setNote("Готово");
       void loadRecentConversations();
+      void loadMessages(conversationId);
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") {
         setNote("Остановлено");
@@ -1913,13 +2016,18 @@ export default function Home() {
     }
 
     const batchId = createRuntimeId();
-    const pendingAttachments: FileAttachment[] = selectedFiles.map((file) => ({
-      batchId,
-      fileName: file.name,
-      fileType: file.type || inferClientFileType(file.name),
-      fileSize: file.size,
-      status: "uploading"
-    }));
+    const pendingAttachments: FileAttachment[] = selectedFiles.map((file) => {
+      const fileType = file.type || inferClientFileType(file.name);
+      const canPreview = isImageAttachment({ fileName: file.name, fileType });
+      return {
+        batchId,
+        fileName: file.name,
+        fileType,
+        fileSize: file.size,
+        previewUrl: canPreview ? URL.createObjectURL(file) : undefined,
+        status: "uploading"
+      };
+    });
 
     setAttachments((current) => [...current, ...pendingAttachments]);
     if (fileInputRef.current) fileInputRef.current.value = "";
@@ -1959,7 +2067,26 @@ export default function Home() {
               error: "Не удалось получить данные загруженного файла"
             };
           }
-          return { ...document, batchId, status: "ready" };
+          if (attachment.previewUrl?.startsWith("blob:")) {
+            const normalized = normalizeClientAttachment({
+              ...(document as unknown as Record<string, unknown>),
+              batchId,
+              status: "ready"
+            });
+            const serverPreview = normalized.previewUrl;
+            const keepBlob =
+              !serverPreview ||
+              (!serverPreview.startsWith("data:") && serverPreview.startsWith("/api/"));
+            return {
+              ...normalized,
+              previewUrl: keepBlob ? attachment.previewUrl : serverPreview
+            };
+          }
+          return normalizeClientAttachment({
+            ...(document as unknown as Record<string, unknown>),
+            batchId,
+            status: "ready"
+          });
         });
       });
       setNote(selectedFiles.length > 1 ? "Файлы готовы" : "Файл готов");
@@ -2066,13 +2193,26 @@ export default function Home() {
                       {activeChatTitle}
                     </span>
                   )
-                ) : (
-                  "Умный чат с личной памятью"
-                )}
+                ) : null}
               </span>
             </div>
           </div>
           <div className="top-bar-actions">
+            <label className="chat-model-select-wrap" title="Режим модели ответа">
+              <span className="chat-model-select-label">Режим</span>
+              <select
+                aria-label="Режим ответа"
+                className="chat-model-select"
+                onChange={(event) => handleChatModeChange(event.target.value)}
+                value={chatMode}
+              >
+                {CHAT_MODE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
               aria-label="Проверять голос перед отправкой"
               aria-pressed={reviewVoiceBeforeSend}
@@ -2089,44 +2229,54 @@ export default function Home() {
             >
               <TextCursorInput size={18} />
             </button>
-            {activeConversationId ? (
-              <>
-                <button
-                  aria-label={isActiveConversationPinned ? "Открепить чат" : "Закрепить чат"}
-                  aria-pressed={isActiveConversationPinned}
-                  className={`chat-share-button chat-pin-button ${
-                    isActiveConversationPinned ? "is-pinned" : ""
-                  }`}
-                  onClick={() => {
-                    void toggleConversationPin();
-                  }}
-                  title={isActiveConversationPinned ? "Открепить чат" : "Закрепить чат"}
-                  type="button"
-                >
-                  <Pin size={18} />
-                </button>
-                <button
-                  aria-label="Файлы чата"
-                  className="chat-share-button"
-                  onClick={openChatFilesPanel}
-                  title="Файлы чата"
-                  type="button"
-                >
-                  <FileText size={18} />
-                </button>
-                <button
-                  aria-label="Копировать ссылку на чат"
-                  className="chat-share-button"
-                  onClick={() => {
-                    void copyChatLink(activeConversationId);
-                  }}
-                  title="Копировать ссылку на чат"
-                  type="button"
-                >
-                  <Link2 size={18} />
-                </button>
-              </>
-            ) : null}
+            <button
+              aria-label={isActiveConversationPinned ? "Открепить чат" : "Закрепить чат"}
+              aria-pressed={isActiveConversationPinned}
+              className={`chat-share-button chat-pin-button ${
+                isActiveConversationPinned ? "is-pinned" : ""
+              }`}
+              disabled={!activeConversationId}
+              onClick={() => {
+                void toggleConversationPin();
+              }}
+              title={isActiveConversationPinned ? "Открепить чат" : "Закрепить чат"}
+              type="button"
+            >
+              <Pin size={18} />
+            </button>
+            <button
+              aria-label="Файлы чата"
+              className="chat-share-button"
+              disabled={!activeConversationId}
+              onClick={() => openChatFilesPanel("files")}
+              title="Файлы чата"
+              type="button"
+            >
+              <FileText size={18} />
+            </button>
+            <button
+              aria-label="Изображения чата"
+              className="chat-share-button"
+              disabled={!activeConversationId}
+              onClick={() => openChatFilesPanel("images")}
+              title="Изображения чата"
+              type="button"
+            >
+              <ImageIcon size={18} />
+            </button>
+            <button
+              aria-label="Копировать ссылку на чат"
+              className="chat-share-button"
+              disabled={!activeConversationId}
+              onClick={() => {
+                if (!activeConversationId) return;
+                void copyChatLink(activeConversationId);
+              }}
+              title="Копировать ссылку на чат"
+              type="button"
+            >
+              <Link2 size={18} />
+            </button>
           </div>
         </header>
 
@@ -2139,7 +2289,7 @@ export default function Home() {
             className={`messages ${hasMessages ? "" : "empty"} ${showProjectView ? "project-view" : ""} ${
               messagesPull.isActive ? "is-pulling" : ""
             } ${messagesPull.isRefreshing ? "is-refreshing" : ""}`}
-            key={String(activeConversationId ?? activeProjectId ?? "no-conversation")}
+            key={messagesSurfaceKey}
             ref={messagesRef}
             aria-live="polite"
             style={
@@ -2151,12 +2301,14 @@ export default function Home() {
           {showProjectView && activeProject ? (
             <ProjectNavigator
               conversations={projectConversations}
+              initialTab={projectNavigatorTab}
               onBack={closeProjectView}
               onNewChat={() => {
                 void startNewChat();
               }}
               onOpenConversation={openConversation}
               onOpenFile={handleOpenNavFile}
+              onDownloadFile={handleDownloadNavFile}
               projectId={activeProject.id}
               projectTitle={activeProject.title}
             />
@@ -2169,9 +2321,9 @@ export default function Home() {
               </div>
             </div>
           ) : null}
-          {!hasMessages && !showProjectView && !libraryView && activeConversationId == null ? (
+          {showWelcomeEmpty ? (
             <div className="empty-state">
-              <WelcomeRotatingText key={welcomeAnimationKey} />
+              <WelcomeRotatingText />
               <div className="quick-actions">
                 {QUICK_ACTION_PROMPTS.map((prompt) => (
                   <button
@@ -2186,7 +2338,7 @@ export default function Home() {
               </div>
             </div>
           ) : null}
-          {!hasMessages && !showProjectView && activeConversationId != null ? (
+          {showHistoryEmptyState ? (
             <div className="empty-state history-loading-state">
               {isLoadingHistory ? (
                 <>
@@ -2257,10 +2409,11 @@ export default function Home() {
                       ) : null}
                       {visibleAttachments.length ? (
                         <MessageAttachments
+                          accessToken={accessToken}
                           attachments={visibleAttachments}
-                          resolveAssetUrl={authUrl}
+                          authFetch={authFetch}
+                          onDownload={(attachment) => void downloadAttachment(attachment)}
                           onOpen={(attachment) => void openFileAttachment(attachment)}
-                          onPreview={setPreviewImage}
                         />
                       ) : null}
                       {generatedImageUrl ? (
@@ -2323,10 +2476,11 @@ export default function Home() {
                   ) : null}
                   {visibleAttachments.length ? (
                     <MessageAttachments
+                      accessToken={accessToken}
                       attachments={visibleAttachments}
-                      resolveAssetUrl={authUrl}
+                      authFetch={authFetch}
+                      onDownload={(attachment) => void downloadAttachment(attachment)}
                       onOpen={(attachment) => void openFileAttachment(attachment)}
-                      onPreview={setPreviewImage}
                     />
                   ) : null}
                   {generatedImageUrl ? (
@@ -2428,10 +2582,17 @@ export default function Home() {
               {attachments.map((attachment, index) => (
                 <UploadAttachmentCard
                   attachment={attachment}
+                  authFetch={authFetch}
                   key={`${attachment.fileName}-${index}`}
                   onRemove={() =>
                     setAttachments((current) =>
-                      current.filter((_, currentIndex) => currentIndex !== index)
+                      current.filter((item, currentIndex) => {
+                        if (currentIndex !== index) return true;
+                        if (item.previewUrl?.startsWith("blob:")) {
+                          URL.revokeObjectURL(item.previewUrl);
+                        }
+                        return false;
+                      })
                     )
                   }
                 />
@@ -2675,7 +2836,8 @@ export default function Home() {
                 }
               }}
               onOpenConversation={openConversation}
-              onOpenProject={openProject}
+              onOpenProjectFiles={(projectId) => openProject(projectId, "files")}
+              onOpenProjectImages={(projectId) => openProject(projectId, "images")}
               onOpenMenu={setOpenMenuProjectId}
               onRenameProject={(projectId, title) => void renameProject(projectId, title)}
               onToggleProject={toggleProject}
@@ -2775,43 +2937,21 @@ export default function Home() {
       ) : null}
 
       {previewImage ? (
-        <div className="image-modal" role="dialog" aria-modal="true">
-          <button
-            aria-label="Закрыть изображение"
-            className="image-modal-backdrop"
-            onClick={() => setPreviewImage(null)}
-            type="button"
-          />
-          <div className="image-modal-content">
-            <button
-              aria-label="Закрыть изображение"
-              className="image-modal-close"
-              onClick={() => setPreviewImage(null)}
-              type="button"
-            >
-              <X size={20} />
-            </button>
-            {previewImage.fullUrl || previewImage.previewUrl ? (
-              <img
-                src={authUrl(previewImage.fullUrl ?? previewImage.previewUrl ?? "")}
-                alt={previewImage.fileName}
-              />
-            ) : previewImage.id != null ? (
-              <img
-                src={authUrl(buildDocumentDownloadUrl(previewImage.id, true))}
-                alt={previewImage.fileName}
-              />
-            ) : null}
-            <div>{previewImage.fileName}</div>
-          </div>
-        </div>
+        <ImagePreviewModal
+          attachment={previewImage}
+          authFetch={authFetch}
+          onClose={() => setPreviewImage(null)}
+          onDownload={downloadAttachment}
+        />
       ) : null}
 
       {showChatFilesPanel && activeConversationId ? (
         <ChatFilesPanel
           conversationId={activeConversationId}
           conversationTitle={activeChatTitle}
+          kind={chatFilesPanelKind}
           onClose={() => setShowChatFilesPanel(false)}
+          onDownloadFile={handleDownloadNavFile}
           onOpenFile={handleOpenNavFile}
         />
       ) : null}
@@ -2821,9 +2961,10 @@ export default function Home() {
           onClose={() => setChatContextMenu(null)}
           onCopyLink={() => void copyChatLink(chatContextMenu.conversationId)}
           onCreateProject={() => createProjectFromChat(chatContextMenu.conversationId)}
+          onDelete={() => void deleteChatById(chatContextMenu.conversationId)}
           onOpenFiles={() => {
             openConversation(chatContextMenu.conversationId);
-            setShowChatFilesPanel(true);
+            openChatFilesPanel("files");
           }}
           onRename={() => beginChatRenameForConversation(chatContextMenu.conversationId)}
           x={chatContextMenu.x}
@@ -2979,22 +3120,13 @@ function buildDocumentDownloadUrl(documentId: string | number, inline: boolean) 
   return `/api/documents/${documentId}/download${suffix}`;
 }
 
-function triggerDocumentDownloadLink(url: string, fileName: string, inline: boolean) {
-  const link = document.createElement("a");
-  link.href = url;
-  link.rel = "noopener noreferrer";
-  if (inline) {
-    link.target = "_blank";
-  } else {
-    link.download = fileName;
-  }
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-}
-
-async function downloadDocumentViaBlob(url: string, fileName: string, inline: boolean) {
-  const response = await fetch(url);
+async function downloadDocumentViaBlob(
+  url: string,
+  fileName: string,
+  inline: boolean,
+  fetchFn: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> = fetch
+) {
+  const response = await fetchFn(url);
   if (!response.ok) {
     throw new Error("Download failed");
   }
@@ -3010,7 +3142,7 @@ async function downloadDocumentViaBlob(url: string, fileName: string, inline: bo
 
   const link = document.createElement("a");
   link.href = blobUrl;
-  link.download = fileName;
+  link.download = sanitizeDownloadFileName(fileName);
   link.rel = "noopener noreferrer";
   document.body.appendChild(link);
   link.click();
@@ -3018,61 +3150,178 @@ async function downloadDocumentViaBlob(url: string, fileName: string, inline: bo
   window.setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
 }
 
+function mergeLoadedChatMessages(
+  previous: ChatMessage[],
+  loaded: Array<{
+    role: "user" | "assistant";
+    content: string;
+    attachments?: Array<Record<string, unknown>>;
+    imageUrl?: string | null;
+    metadata?: Record<string, unknown>;
+  }>
+): ChatMessage[] {
+  return loaded.map((message, index) => {
+    let attachments = (message.attachments ?? []).map((attachment) =>
+      normalizeClientAttachment(attachment)
+    );
+
+    if (attachments.length === 0 && message.role === "user") {
+      const previousMatch = [...previous]
+        .reverse()
+        .find(
+          (item) =>
+            item.role === "user" &&
+            item.content === message.content &&
+            (item.attachments?.length ?? 0) > 0
+        );
+      if (previousMatch?.attachments?.length) {
+        attachments = previousMatch.attachments.map((attachment) =>
+          normalizeClientAttachment(attachment as unknown as Record<string, unknown>)
+        );
+      }
+    }
+
+    attachments = attachments.map((attachment) => {
+      if (resolveAttachmentPreviewUrl(attachment)) return attachment;
+
+      const previousMessage = previous[index];
+      const previousAttachment = previousMessage?.attachments?.find(
+        (item) =>
+          (item.id != null && item.id === attachment.id) ||
+          item.fileName === attachment.fileName
+      );
+      if (!previousAttachment?.previewUrl) return attachment;
+
+      return {
+        ...attachment,
+        previewUrl: previousAttachment.previewUrl,
+        fullUrl: attachment.fullUrl ?? previousAttachment.fullUrl
+      };
+    });
+
+    return {
+      role: message.role,
+      content: message.content,
+      attachments,
+      imageUrl: message.imageUrl ?? undefined,
+      metadata: message.metadata ?? undefined,
+      replyTo: readReplyFromMetadata(message.metadata)
+    };
+  });
+}
+
 function MessageAttachments({
   attachments,
-  resolveAssetUrl,
+  accessToken,
+  authFetch,
   onOpen,
-  onPreview
+  onDownload
 }: {
   attachments: FileAttachment[];
-  resolveAssetUrl?: (url: string) => string;
+  accessToken?: string | null;
+  authFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   onOpen: (attachment: FileAttachment) => void;
-  onPreview: (attachment: FileAttachment) => void;
+  onDownload: (attachment: FileAttachment) => void;
 }) {
-  const assetUrl = resolveAssetUrl ?? ((url: string) => url);
   return (
     <div className="message-attachments">
-      {attachments.map((attachment) =>
-        isImage(attachment) && attachment.previewUrl ? (
-          <button
-            className="message-image-attachment"
-            key={attachment.id ?? attachment.fileName}
-            onClick={() => onPreview(attachment)}
-            type="button"
+      {attachments.map((attachment) => {
+        const previewUrl = resolveAttachmentPreviewUrl(attachment);
+        const canDownload = resolveAttachmentDownloadSources(attachment).length > 0;
+
+        return previewUrl ? (
+          <div
+            className="message-attachment-row"
+            key={`${attachment.id ?? attachment.fileName}-${accessToken ?? "anon"}`}
           >
-            <img src={assetUrl(attachment.previewUrl)} alt={attachment.fileName} />
-            <span>{attachment.fileName}</span>
-          </button>
+            <button
+              className="message-image-attachment"
+              onClick={() => onOpen(attachment)}
+              type="button"
+            >
+              <AuthenticatedImage
+                alt={attachment.fileName}
+                authFetch={authFetch}
+                className="message-image-attachment-img"
+                fallback={
+                  <div className="message-image-attachment-fallback">
+                    <ImageIcon size={22} />
+                  </div>
+                }
+                src={previewUrl}
+              />
+              <span>{attachment.fileName}</span>
+            </button>
+            {canDownload ? (
+              <button
+                aria-label={`Скачать ${attachment.fileName}`}
+                className="message-attachment-download"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDownload(attachment);
+                }}
+                title="Скачать"
+                type="button"
+              >
+                <Download size={16} />
+              </button>
+            ) : null}
+          </div>
         ) : (
-          <button
-            className="message-file-attachment"
-            key={attachment.id ?? attachment.fileName}
-            onClick={() => onOpen(attachment)}
-            title="Открыть или скачать файл"
-            type="button"
-          >
-            <div className="message-file-icon">{iconForAttachment(attachment)}</div>
-            <div className="message-file-meta">
-              <strong>{spreadsheetDisplayName(attachment)}</strong>
-              <span>{attachmentDetails(attachment)}</span>
-            </div>
-          </button>
-        )
-      )}
+          <div className="message-attachment-row" key={attachment.id ?? attachment.fileName}>
+            <button
+              className="message-file-attachment"
+              onClick={() => onOpen(attachment)}
+              title="Открыть файл"
+              type="button"
+            >
+              <div className="message-file-icon">{iconForAttachment(attachment)}</div>
+              <div className="message-file-meta">
+                <strong>{spreadsheetDisplayName(attachment)}</strong>
+                <span>{attachmentDetails(attachment)}</span>
+              </div>
+            </button>
+            {canDownload ? (
+              <button
+                aria-label={`Скачать ${attachment.fileName}`}
+                className="message-attachment-download"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDownload(attachment);
+                }}
+                title="Скачать"
+                type="button"
+              >
+                <Download size={16} />
+              </button>
+            ) : null}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
 function UploadAttachmentCard({
   attachment,
-  onRemove
+  onRemove,
+  authFetch
 }: {
   attachment: FileAttachment;
   onRemove: () => void;
+  authFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }) {
+  const previewUrl = resolveAttachmentPreviewUrl(attachment);
+
   return (
-    <div className={`attachment-card ${attachment.status ?? "ready"}`}>
-      <div className="attachment-file-icon">{iconForAttachment(attachment)}</div>
+    <div className={`attachment-card ${attachment.status ?? "ready"} ${previewUrl ? "has-image-preview" : ""}`}>
+      {previewUrl ? (
+        <div className="attachment-image-preview">
+          <AuthenticatedImage alt="" authFetch={authFetch} src={previewUrl} />
+        </div>
+      ) : (
+        <div className="attachment-file-icon">{iconForAttachment(attachment)}</div>
+      )}
       <div className="attachment-meta">
         <div className="attachment-name">{spreadsheetDisplayName(attachment)}</div>
         <div className="attachment-status">
@@ -3103,7 +3352,7 @@ function UploadAttachmentCard({
 }
 
 function iconForAttachment(attachment: FileAttachment) {
-  if (isImage(attachment)) return <ImageIcon size={18} />;
+  if (isImageAttachment(attachment)) return <ImageIcon size={18} />;
   if (isSpreadsheet(attachment)) return <FileSpreadsheet size={18} />;
   return <FileText size={18} />;
 }
@@ -3142,14 +3391,6 @@ function formatFileSize(size: number) {
   if (size < 1024) return `${size} Б`;
   if (size < 1024 * 1024) return `${Math.round(size / 1024)} КБ`;
   return `${(size / 1024 / 1024).toFixed(1)} МБ`;
-}
-
-function isImage(attachment: FileAttachment) {
-  return (
-    attachment.fileType.startsWith("image/") ||
-    attachment.metadata?.kind === "image" ||
-    attachment.metadata?.kind === "generated_image"
-  );
 }
 
 function isSpreadsheet(attachment: FileAttachment) {

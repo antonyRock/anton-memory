@@ -1,6 +1,10 @@
 import * as XLSX from "xlsx";
 import { sanitizeDocumentMetadataForClient } from "@/lib/client-payload";
+import { buildDocumentDownloadUrl, buildDocumentInlineUrl } from "@/lib/document-urls";
+import { toAsciiDownloadFileName } from "@/lib/download-filename";
+import { isImageDocument as isImageMimeDocument, resolveDocumentMimeType } from "@/lib/mime-types";
 import { extractAndSaveDocumentMemory, getDocumentLinkedMemoryForPrompt, searchDocumentIdsByQuery } from "@/lib/document-memory";
+import { createImageThumbnailBase64 } from "@/lib/image-thumbnail";
 import {
   parseSpreadsheetWorkbook,
   spreadsheetFileTypeFromName
@@ -35,8 +39,6 @@ export type StoredImageFile = {
   fileType: string;
   buffer: Buffer;
 };
-
-import { buildDocumentDownloadUrl, buildDocumentInlineUrl } from "@/lib/document-urls";
 
 export { buildDocumentInlineUrl };
 
@@ -340,41 +342,60 @@ async function downloadStorageFile(storagePath: string) {
     console.error("Storage client download failed:", error);
   }
 
+  try {
+    const { data, error } = await supabase.storage.from(DOCUMENTS_BUCKET).createSignedUrl(storagePath, 120);
+    if (!error && data?.signedUrl) {
+      const response = await fetch(data.signedUrl, { signal: AbortSignal.timeout(60_000) });
+      if (response.ok) return Buffer.from(await response.arrayBuffer());
+    }
+  } catch (error) {
+    console.error("Storage signed URL download failed:", error);
+  }
+
   const restBuffer = await downloadStorageWithRestApi(storagePath);
   if (restBuffer) return restBuffer;
 
   return downloadStorageWithNodeHttps(storagePath);
 }
 
-function getDocumentImageBufferFromMetadata(
+function getDocumentOriginalBufferFromMetadata(
   metadata: Record<string, unknown>,
   fileType: string
 ) {
   const inlineBase64 =
     typeof metadata.inline_base64 === "string" ? metadata.inline_base64 : null;
-  if (inlineBase64) {
-    return {
-      buffer: Buffer.from(inlineBase64, "base64"),
-      fileType
-    };
-  }
+  if (!inlineBase64) return null;
 
+  return {
+    buffer: Buffer.from(inlineBase64, "base64"),
+    fileType
+  };
+}
+
+function getDocumentThumbnailBufferFromMetadata(metadata: Record<string, unknown>) {
   const thumbnailBase64 =
     typeof metadata.preview_thumbnail_base64 === "string"
       ? metadata.preview_thumbnail_base64
       : null;
-  if (thumbnailBase64) {
-    const thumbnailType =
-      typeof metadata.preview_thumbnail_type === "string"
-        ? metadata.preview_thumbnail_type
-        : "image/jpeg";
-    return {
-      buffer: Buffer.from(thumbnailBase64, "base64"),
-      fileType: thumbnailType
-    };
-  }
+  if (!thumbnailBase64) return null;
 
-  return null;
+  const thumbnailType =
+    typeof metadata.preview_thumbnail_type === "string"
+      ? metadata.preview_thumbnail_type
+      : "image/jpeg";
+  return {
+    buffer: Buffer.from(thumbnailBase64, "base64"),
+    fileType: thumbnailType
+  };
+}
+
+function getDocumentImageBufferFromMetadata(
+  metadata: Record<string, unknown>,
+  fileType: string
+) {
+  const original = getDocumentOriginalBufferFromMetadata(metadata, fileType);
+  if (original) return original;
+  return getDocumentThumbnailBufferFromMetadata(metadata);
 }
 
 function buildMetadataImageDataUrl(metadata: Record<string, unknown>, fileType: string) {
@@ -426,7 +447,7 @@ export async function processAndStoreFile(
   projectId?: string | number | null
 ): Promise<StoredDocument> {
   const bytes = Buffer.from(await file.arrayBuffer());
-  const fileType = file.type || inferTypeFromName(file.name);
+  const fileType = resolveDocumentMimeType(file.type, file.name);
   const storagePath = `uploads/${Date.now()}-${sanitizeFileName(file.name)}`;
   const extracted = await extractFileText(file, bytes);
   const extractedText = sanitizeStorageText(extracted.text);
@@ -434,6 +455,23 @@ export async function processAndStoreFile(
   const supabase = getSupabase();
   let metadata: Record<string, unknown> = extracted.metadata;
   let savedStoragePath = storagePath;
+
+  if (fileType.startsWith("image/")) {
+    const thumbnail = await createImageThumbnailBase64(bytes);
+    if (thumbnail) {
+      metadata = {
+        ...metadata,
+        preview_thumbnail_base64: thumbnail.base64,
+        preview_thumbnail_type: thumbnail.mimeType
+      };
+    } else if (bytes.length <= 200_000) {
+      metadata = {
+        ...metadata,
+        preview_thumbnail_base64: bytes.toString("base64"),
+        preview_thumbnail_type: fileType
+      };
+    }
+  }
 
   try {
     await uploadStorageFile(storagePath, bytes, fileType || "application/octet-stream");
@@ -570,43 +608,170 @@ export async function linkDocumentsToMessage(input: {
   }
 }
 
-export async function getDocumentDownloadPayload(documentId: string | number) {
+async function userCanAccessDocument(documentId: number, userId: string) {
+  const supabase = getSupabase();
+  const { data: links, error: linksError } = await supabase
+    .from("message_documents")
+    .select("message_id")
+    .eq("document_id", documentId);
+
+  if (linksError) {
+    console.error("Document access lookup failed:", linksError.message);
+    return false;
+  }
+
+  const messageIds = (links ?? [])
+    .map((link) => Number(link.message_id))
+    .filter((messageId) => Number.isFinite(messageId));
+  if (messageIds.length === 0) return false;
+
+  const { data: ownedMessages, error: ownedMessagesError } = await supabase
+    .from("messages")
+    .select("id")
+    .in("id", messageIds)
+    .eq("user_id", userId)
+    .limit(1);
+
+  if (ownedMessagesError) {
+    console.error("Document message access lookup failed:", ownedMessagesError.message);
+    return false;
+  }
+
+  if ((ownedMessages?.length ?? 0) > 0) return true;
+
+  const { data: messages, error: messagesError } = await supabase
+    .from("messages")
+    .select("conversation_id")
+    .in("id", messageIds);
+
+  if (messagesError) {
+    console.error("Document conversation lookup failed:", messagesError.message);
+    return false;
+  }
+
+  const conversationIds = [
+    ...new Set(
+      (messages ?? [])
+        .map((message) => message.conversation_id)
+        .filter((conversationId) => conversationId != null)
+        .map(String)
+    )
+  ];
+  if (conversationIds.length === 0) return false;
+
+  const { data: conversations, error: conversationsError } = await supabase
+    .from("conversations")
+    .select("id")
+    .in("id", conversationIds)
+    .eq("user_id", userId)
+    .limit(1);
+
+  if (conversationsError) {
+    console.error("Document conversation access lookup failed:", conversationsError.message);
+    return false;
+  }
+
+  return (conversations?.length ?? 0) > 0;
+}
+
+async function getAccessibleDocumentRecord(documentId: number, userId: string) {
   const supabase = getSupabase();
   const { data, error } = await supabase
     .from("documents")
-    .select("file_name, file_type, storage_path, metadata")
+    .select("file_name, file_type, storage_path, metadata, user_id")
     .eq("id", documentId)
-    .eq("user_id", getCurrentUserId())
     .maybeSingle();
 
   if (error || !data) return null;
 
-  const metadata = normalizeMetadata(data.metadata);
-  const fileType = String(data.file_type ?? "application/octet-stream");
-  const fromMetadata = getDocumentImageBufferFromMetadata(metadata, fileType);
-  if (fromMetadata) {
-    return {
-      fileName: String(data.file_name ?? "file"),
-      fileType: fromMetadata.fileType,
-      buffer: fromMetadata.buffer
-    };
+  const ownsDocument = String(data.user_id ?? "") === String(userId);
+  if (!ownsDocument) {
+    const hasLinkedAccess = await userCanAccessDocument(documentId, userId);
+    if (!hasLinkedAccess) return null;
   }
 
-  const storagePath = String(data.storage_path ?? "");
+  return data;
+}
+
+export async function getDocumentSignedDownloadUrl(
+  documentId: string | number,
+  userId: string
+) {
+  const resolvedId = Number(documentId);
+  if (!Number.isFinite(resolvedId)) return null;
+
+  const data = await getAccessibleDocumentRecord(resolvedId, userId);
+  if (!data) return null;
+
+  const storagePath = String(data.storage_path ?? "").trim();
   if (!storagePath) return null;
 
-  const buffer = await downloadStorageFile(storagePath);
+  const supabase = getSupabase();
+  const fileName = String(data.file_name ?? "file");
+  const downloadFileName = toAsciiDownloadFileName(fileName);
+  const { data: signed, error: signError } = await supabase.storage
+    .from(DOCUMENTS_BUCKET)
+    .createSignedUrl(storagePath, 120, { download: downloadFileName });
 
-  if (!buffer) {
-    console.error("Document download failed for storage path:", storagePath);
+  if (signError || !signed?.signedUrl) {
+    console.error("Signed URL generation failed:", signError?.message);
     return null;
   }
 
   return {
-    fileName: String(data.file_name ?? "file"),
-    fileType,
-    buffer
+    url: signed.signedUrl,
+    fileName,
+    downloadFileName
   };
+}
+
+export async function getDocumentDownloadPayload(
+  documentId: string | number,
+  userId: string,
+  options: { allowPreviewFallback?: boolean } = {}
+) {
+  const resolvedId = Number(documentId);
+  if (!Number.isFinite(resolvedId)) return null;
+
+  const data = await getAccessibleDocumentRecord(resolvedId, userId);
+  if (!data) return null;
+
+  const metadata = normalizeMetadata(data.metadata);
+  const fileName = String(data.file_name ?? "file");
+  const fileType = resolveDocumentMimeType(String(data.file_type ?? "application/octet-stream"), fileName);
+
+  const storagePath = String(data.storage_path ?? "").trim();
+  if (storagePath) {
+    const buffer = await downloadStorageFile(storagePath);
+    if (buffer?.length) {
+      return { fileName, fileType, buffer, source: "storage" as const };
+    }
+    console.error("Document storage download failed:", storagePath);
+  }
+
+  const originalFromMetadata = getDocumentOriginalBufferFromMetadata(metadata, fileType);
+  if (originalFromMetadata) {
+    return {
+      fileName,
+      fileType: originalFromMetadata.fileType,
+      buffer: originalFromMetadata.buffer,
+      source: "inline_metadata" as const
+    };
+  }
+
+  if (options.allowPreviewFallback) {
+    const thumbnailFromMetadata = getDocumentThumbnailBufferFromMetadata(metadata);
+    if (thumbnailFromMetadata) {
+      return {
+        fileName,
+        fileType: thumbnailFromMetadata.fileType,
+        buffer: thumbnailFromMetadata.buffer,
+        source: "thumbnail_metadata" as const
+      };
+    }
+  }
+
+  return null;
 }
 
 export async function getDocumentAttachments(ids: Array<string | number>) {
@@ -616,20 +781,17 @@ export async function getDocumentAttachments(ids: Array<string | number>) {
   const { data, error } = await supabase
     .from("documents")
     .select("id, file_name, file_type, file_size, storage_path, summary, metadata")
-    .in("id", ids)
-    .eq("user_id", getCurrentUserId());
+    .in(
+      "id",
+      ids.map((id) => Number(id)).filter((id) => Number.isFinite(id))
+    );
 
   if (error) {
     console.error("Document attachment retrieval failed:", error.message);
     return [];
   }
 
-  const sanitizedDocuments = (data ?? []).map((document) => ({
-    ...document,
-    metadata: sanitizeDocumentMetadataForClient(normalizeMetadata(document.metadata))
-  }));
-
-  return sanitizedDocuments.map(toDocumentAttachment);
+  return (data ?? []).map((document) => toDocumentAttachment(document as Record<string, unknown>));
 }
 
 export async function getDocumentsForMessages(
@@ -926,8 +1088,9 @@ async function getImageFiles(ids: Array<string | number>): Promise<StoredImageFi
   const images: StoredImageFile[] = [];
   for (const document of data ?? []) {
     const metadata = normalizeMetadata(document.metadata);
-    const fileType = String(document.file_type ?? "");
-    if (!isImageDocument(fileType, metadata)) continue;
+    const fileName = String(document.file_name ?? "image.png");
+    const fileType = resolveDocumentMimeType(String(document.file_type ?? ""), fileName);
+    if (!isImageMimeDocument({ fileType, fileName, metadata })) continue;
 
     const inlineBase64 =
       typeof metadata.inline_base64 === "string" ? metadata.inline_base64 : null;
@@ -961,12 +1124,16 @@ async function getImageFiles(ids: Array<string | number>): Promise<StoredImageFi
 }
 
 function toDocumentAttachment(document: Record<string, unknown>): DocumentAttachment {
-  const fileType = String(document.file_type ?? "application/octet-stream");
+  const fileName = String(document.file_name ?? "file");
+  const fileType = resolveDocumentMimeType(String(document.file_type ?? "application/octet-stream"), fileName);
   const metadata = normalizeMetadata(document.metadata);
-  const isImage = isImageDocument(fileType, metadata);
+  const isImage = isImageMimeDocument({ fileType, fileName, metadata });
   const documentId = document.id as string | number | undefined;
+  const thumbnailDataUrl = buildMetadataImageDataUrl(metadata, fileType);
   const fileUrl =
-    documentId != null ? buildDocumentDownloadUrl(documentId, isImage) : null;
+    documentId != null ? buildDocumentDownloadUrl(documentId, false) : null;
+  const inlineUrl =
+    documentId != null ? buildDocumentDownloadUrl(documentId, true) : null;
 
   return {
     id: documentId as string | number,
@@ -975,7 +1142,7 @@ function toDocumentAttachment(document: Record<string, unknown>): DocumentAttach
     fileSize: Number(document.file_size ?? 0),
     summary: document.summary ? String(document.summary) : null,
     metadata: sanitizeDocumentMetadataForClient(metadata),
-    previewUrl: isImage ? fileUrl : null,
+    previewUrl: isImage ? (thumbnailDataUrl ?? inlineUrl) : null,
     fullUrl: fileUrl
   };
 }
@@ -988,7 +1155,7 @@ type ExtractedFileContent = {
 
 async function extractFileText(file: File, bytes: Buffer): Promise<ExtractedFileContent> {
   const lowerName = file.name.toLowerCase();
-  const type = file.type || inferTypeFromName(file.name);
+  const type = resolveDocumentMimeType(file.type, file.name);
 
   if (
     lowerName.endsWith(".csv") ||
@@ -1115,32 +1282,10 @@ function sanitizeFileName(name: string) {
   return name.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "file";
 }
 
-function inferTypeFromName(name: string) {
-  const lower = name.toLowerCase();
-  if (lower.endsWith(".xlsx")) return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  if (lower.endsWith(".xls")) return "application/vnd.ms-excel";
-  if (lower.endsWith(".pdf")) return "application/pdf";
-  if (lower.endsWith(".docx")) return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  if (lower.endsWith(".csv")) return "text/csv";
-  if (lower.endsWith(".txt") || lower.endsWith(".md")) return "text/plain";
-  if (lower.endsWith(".png")) return "image/png";
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
-  if (lower.endsWith(".webp")) return "image/webp";
-  return "application/octet-stream";
-}
-
 function isTextLike(type: string, lowerName: string) {
   return (
     type.startsWith("text/") ||
     /\.(txt|md|csv|json|xml|html|css|js|ts|tsx|jsx|py|sql|log)$/i.test(lowerName)
-  );
-}
-
-function isImageDocument(fileType: string, metadata?: { kind?: string } | null) {
-  return (
-    fileType.startsWith("image/") ||
-    metadata?.kind === "image" ||
-    metadata?.kind === "generated_image"
   );
 }
 

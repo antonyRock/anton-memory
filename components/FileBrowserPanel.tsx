@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  Download,
   FileSpreadsheet,
   FileText,
   Image as ImageIcon,
@@ -9,6 +10,7 @@ import {
   Sparkles,
   X
 } from "lucide-react";
+import { AuthenticatedImage } from "@/components/AuthenticatedImage";
 import type { FileNavGroup, FileNavItem } from "@/lib/file-nav-shared";
 import { resolveFileNavPreviewUrl } from "@/lib/file-nav-shared";
 
@@ -69,7 +71,9 @@ type FileBrowserPanelProps = {
   search: string;
   onSearchChange: (value: string) => void;
   onOpenFile: (file: FileNavItem) => void;
+  onDownloadFile?: (file: FileNavItem) => void;
   onClose?: () => void;
+  authFetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 };
 
 export function FileBrowserPanel({
@@ -83,7 +87,9 @@ export function FileBrowserPanel({
   search,
   onSearchChange,
   onOpenFile,
-  onClose
+  onDownloadFile,
+  onClose,
+  authFetch
 }: FileBrowserPanelProps) {
   const isGrid = layout === "grid";
 
@@ -124,13 +130,25 @@ export function FileBrowserPanel({
                 {isGrid ? (
                   <div className="file-browser-grid">
                     {group.files.map((file) => (
-                      <FileNavImageCard file={file} key={String(file.id)} onOpen={onOpenFile} />
+                      <FileNavImageCard
+                        authFetch={authFetch}
+                        file={file}
+                        key={String(file.id)}
+                        onOpen={onOpenFile}
+                      />
                     ))}
                   </div>
                 ) : (
                   <div className="file-browser-list">
                     {group.files.map((file) => (
-                      <FileNavRow file={file} key={String(file.id)} onOpen={onOpenFile} showChat={false} />
+                      <FileNavRow
+                        authFetch={authFetch}
+                        file={file}
+                        key={String(file.id)}
+                        onDownload={onDownloadFile}
+                        onOpen={onOpenFile}
+                        showChat={false}
+                      />
                     ))}
                   </div>
                 )}
@@ -144,13 +162,25 @@ export function FileBrowserPanel({
         isGrid ? (
           <div className="file-browser-grid">
             {files.map((file) => (
-              <FileNavImageCard file={file} key={String(file.id)} onOpen={onOpenFile} />
+              <FileNavImageCard
+                authFetch={authFetch}
+                file={file}
+                key={String(file.id)}
+                onOpen={onOpenFile}
+              />
             ))}
           </div>
         ) : (
           <div className="file-browser-list">
             {files.map((file) => (
-              <FileNavRow file={file} key={String(file.id)} onOpen={onOpenFile} showChat />
+              <FileNavRow
+                authFetch={authFetch}
+                file={file}
+                key={String(file.id)}
+                onDownload={onDownloadFile}
+                onOpen={onOpenFile}
+                showChat
+              />
             ))}
           </div>
         )
@@ -164,39 +194,69 @@ export function FileBrowserPanel({
 function FileNavRow({
   file,
   onOpen,
-  showChat
+  onDownload,
+  showChat,
+  authFetch
 }: {
   file: FileNavItem;
   onOpen: (file: FileNavItem) => void;
+  onDownload?: (file: FileNavItem) => void;
   showChat: boolean;
+  authFetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }) {
   const previewUrl = resolveFileNavPreviewUrl(file);
 
   return (
-    <button className="file-browser-item" onClick={() => onOpen(file)} type="button">
-      <div className="file-browser-item-icon">
-        {previewUrl ? <img alt="" loading="lazy" src={previewUrl} /> : <FileNavIcon item={file} />}
-      </div>
-      <div className="file-browser-item-meta">
-        <strong>{file.fileName}</strong>
-        <span>
-          {fileTypeLabel(file)} · {formatNavFileSize(file.fileSize)}
-          {file.createdAt ? ` · ${formatNavFileDate(file.createdAt)}` : ""}
-        </span>
-        {showChat && file.conversationTitle ? (
-          <span className="file-browser-item-source">Чат: {file.conversationTitle}</span>
-        ) : null}
-      </div>
-    </button>
+    <div className="file-browser-item-row">
+      <button className="file-browser-item" onClick={() => onOpen(file)} type="button">
+        <div className="file-browser-item-icon">
+          {previewUrl && authFetch ? (
+            <AuthenticatedImage
+              alt=""
+              authFetch={authFetch}
+              loading="lazy"
+              src={previewUrl}
+            />
+          ) : previewUrl ? (
+            <img alt="" loading="lazy" src={previewUrl} />
+          ) : (
+            <FileNavIcon item={file} />
+          )}
+        </div>
+        <div className="file-browser-item-meta">
+          <strong>{file.fileName}</strong>
+          <span>
+            {fileTypeLabel(file)} · {formatNavFileSize(file.fileSize)}
+            {file.createdAt ? ` · ${formatNavFileDate(file.createdAt)}` : ""}
+          </span>
+          {showChat && file.conversationTitle ? (
+            <span className="file-browser-item-source">Чат: {file.conversationTitle}</span>
+          ) : null}
+        </div>
+      </button>
+      {onDownload ? (
+        <button
+          aria-label={`Скачать ${file.fileName}`}
+          className="file-browser-item-download"
+          onClick={() => onDownload(file)}
+          title="Скачать"
+          type="button"
+        >
+          <Download size={16} />
+        </button>
+      ) : null}
+    </div>
   );
 }
 
 function FileNavImageCard({
   file,
-  onOpen
+  onOpen,
+  authFetch
 }: {
   file: FileNavItem;
   onOpen: (file: FileNavItem) => void;
+  authFetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 }) {
   const previewUrl = resolveFileNavPreviewUrl(file);
 
@@ -209,7 +269,14 @@ function FileNavImageCard({
       type="button"
     >
       <div className="file-browser-image-card-preview">
-        {previewUrl ? (
+        {previewUrl && authFetch ? (
+          <AuthenticatedImage
+            alt={file.fileName}
+            authFetch={authFetch}
+            loading="lazy"
+            src={previewUrl}
+          />
+        ) : previewUrl ? (
           <img alt={file.fileName} loading="lazy" src={previewUrl} />
         ) : (
           <div className="file-browser-image-card-fallback">

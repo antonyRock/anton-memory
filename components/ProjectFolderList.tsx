@@ -1,13 +1,6 @@
 "use client";
 
-import {
-  ChevronDown,
-  ChevronRight,
-  Folder,
-  FolderOpen,
-  MoreHorizontal,
-  Plus
-} from "lucide-react";
+import { FileText, Briefcase, Folder, FolderOpen, Image as ImageIcon, MoreHorizontal } from "lucide-react";
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { isConversationPinned, sortConversationsForSidebar } from "@/lib/chat-pins";
 import { SidebarConversationItem } from "@/components/SidebarConversationItem";
@@ -36,8 +29,9 @@ type ProjectFolderListProps = {
   draggingConversationId: string | number | null;
   dropTargetProjectId: string | "general" | null;
   onCreateProject: (title: string) => void | Promise<void>;
-  onOpenProject: (projectId: string | number) => void;
   onToggleProject: (projectId: string | number) => void;
+  onOpenProjectFiles: (projectId: string | number) => void;
+  onOpenProjectImages: (projectId: string | number) => void;
   onOpenMenu: (projectId: string | number) => void;
   onCloseMenu: () => void;
   onRenameProject: (projectId: string | number, title: string) => void;
@@ -71,8 +65,9 @@ export function ProjectFolderList({
   draggingConversationId,
   dropTargetProjectId,
   onCreateProject,
-  onOpenProject,
   onToggleProject,
+  onOpenProjectFiles,
+  onOpenProjectImages,
   onOpenMenu,
   onCloseMenu,
   onRenameProject,
@@ -189,14 +184,16 @@ export function ProjectFolderList({
         </div>
       ) : (
         <button
-          className="sidebar-inline-action"
+          className="sidebar-action sidebar-action-new-chat"
           onClick={() => {
             setIsCreatingProject(true);
             setNewProjectTitle("Новый проект");
           }}
           type="button"
         >
-          <Plus size={15} />
+          <span aria-hidden className="sidebar-action-icon-wrap">
+            <Briefcase size={16} strokeWidth={1.5} />
+          </span>
           Новый проект
         </button>
       )}
@@ -229,18 +226,12 @@ export function ProjectFolderList({
             >
               <div className="project-folder-header">
                 <button
-                  aria-label={isExpanded ? "Свернуть проект" : "Развернуть проект"}
-                  className="project-folder-chevron"
-                  onClick={() => onToggleProject(project.id)}
-                  type="button"
-                >
-                  {isExpanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
-                </button>
-                <button
+                  aria-expanded={isExpanded}
+                  aria-label={isExpanded ? `Свернуть проект ${project.title}` : `Развернуть проект ${project.title}`}
                   className="project-folder-open"
                   onClick={() => {
                     if (renamingProjectId === project.id) return;
-                    onOpenProject(project.id);
+                    onToggleProject(project.id);
                   }}
                   type="button"
                 >
@@ -314,6 +305,26 @@ export function ProjectFolderList({
 
               <div className="project-folder-chats">
                 <div className="project-folder-chats-inner">
+                  <div className="project-folder-resources">
+                    <button
+                      aria-label="Файлы проекта"
+                      className="project-folder-resource-icon"
+                      onClick={() => onOpenProjectFiles(project.id)}
+                      title="Файлы"
+                      type="button"
+                    >
+                      <FileText size={15} strokeWidth={2.1} />
+                    </button>
+                    <button
+                      aria-label="Изображения проекта"
+                      className="project-folder-resource-icon"
+                      onClick={() => onOpenProjectImages(project.id)}
+                      title="Изображения"
+                      type="button"
+                    >
+                      <ImageIcon size={15} strokeWidth={2.1} />
+                    </button>
+                  </div>
                   {projectConversations.length ? (
                     projectConversations.map((conversation, index) => (
                       <SidebarConversationItem

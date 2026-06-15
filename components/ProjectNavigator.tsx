@@ -11,28 +11,36 @@ type ProjectTab = "chats" | "files" | "images";
 type ProjectNavigatorProps = {
   projectId: string | number;
   projectTitle: string;
+  initialTab?: ProjectTab;
   conversations: Array<{ id: string | number; title: string | null }>;
   onBack: () => void;
   onNewChat: () => void;
   onOpenConversation: (conversationId: string | number) => void;
   onOpenFile: (file: FileNavItem) => void;
+  onDownloadFile?: (file: FileNavItem) => void;
 };
 
 export function ProjectNavigator({
   projectId,
   projectTitle,
+  initialTab = "chats",
   conversations,
   onBack,
   onNewChat,
   onOpenConversation,
-  onOpenFile
+  onOpenFile,
+  onDownloadFile
 }: ProjectNavigatorProps) {
   const { authFetch } = useAuthFetch();
-  const [tab, setTab] = useState<ProjectTab>("chats");
+  const [tab, setTab] = useState<ProjectTab>(initialTab);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(false);
   const [files, setFiles] = useState<FileNavItem[]>([]);
   const [groups, setGroups] = useState<FileNavGroup[]>([]);
+
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab, projectId]);
 
   useEffect(() => {
     if (tab === "chats") return;
@@ -131,8 +139,10 @@ export function ProjectNavigator({
           groups={groups}
           layout={tab === "images" ? "grid" : "list"}
           loading={loading}
+          onDownloadFile={onDownloadFile}
           onOpenFile={onOpenFile}
           onSearchChange={setSearch}
+          authFetch={authFetch}
           search={search}
           title={tab === "images" ? "Изображения проекта" : "Файлы проекта"}
         />

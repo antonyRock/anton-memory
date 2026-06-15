@@ -1,4 +1,7 @@
+"use client";
+
 import type { ReactNode } from "react";
+import { MessageLinkRow } from "@/components/MessageLinkCopyButton";
 import { MessagePasteBlock } from "@/components/MessagePasteBlock";
 
 type MessageSegment =
@@ -52,6 +55,48 @@ function splitFencedCodeBlocks(text: string): MessageSegment[] {
   return segments.length > 0 ? segments : [{ type: "text", content: text }];
 }
 
+type InlinePart =
+  | { type: "text"; content: string }
+  | { type: "md-link"; label: string; url: string }
+  | { type: "url"; url: string };
+
+const INLINE_LINK_PATTERN =
+  /\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|(https?:\/\/[^\s<>"')\]]+)/gi;
+
+function normalizeDetectedUrl(value: string) {
+  return value.trim().replace(/[),.;!?]+$/g, "");
+}
+
+function splitInlineParts(text: string): InlinePart[] {
+  const parts: InlinePart[] = [];
+  let lastIndex = 0;
+
+  for (const match of text.matchAll(INLINE_LINK_PATTERN)) {
+    const index = match.index ?? 0;
+    if (index > lastIndex) {
+      parts.push({ type: "text", content: text.slice(lastIndex, index) });
+    }
+
+    if (match[1] && match[2]) {
+      parts.push({
+        type: "md-link",
+        label: match[1],
+        url: normalizeDetectedUrl(match[2])
+      });
+    } else if (match[3]) {
+      parts.push({ type: "url", url: normalizeDetectedUrl(match[3]) });
+    }
+
+    lastIndex = index + match[0].length;
+  }
+
+  if (lastIndex < text.length) {
+    parts.push({ type: "text", content: text.slice(lastIndex) });
+  }
+
+  return parts.length > 0 ? parts : [{ type: "text", content: text }];
+}
+
 function renderInlineMarkdown(text: string): ReactNode {
   const parts: ReactNode[] = [];
   const pattern = /(`[^`\n]+`|\*\*.+?\*\*|__.+?__)/g;
@@ -88,6 +133,38 @@ function renderInlineMarkdown(text: string): ReactNode {
   }
 
   return parts.length > 0 ? parts : text;
+}
+
+function renderTextWithLinks(
+  text: string,
+  onCopyNotify?: (message: string) => void
+): ReactNode {
+  const parts = splitInlineParts(text);
+  const nodes = parts.map((part, index) => {
+    if (part.type === "text") {
+      const content = part.content;
+      return content ? (
+        <span key={`text-${index}`}>{renderInlineMarkdown(content)}</span>
+      ) : null;
+    }
+
+    if (part.type === "md-link") {
+      return (
+        <MessageLinkRow
+          key={`md-link-${index}`}
+          label={part.label}
+          onNotify={onCopyNotify}
+          url={part.url}
+        />
+      );
+    }
+
+    return (
+      <MessageLinkRow key={`url-${index}`} onNotify={onCopyNotify} url={part.url} />
+    );
+  });
+
+  return nodes.filter(Boolean).length === 1 ? nodes[0] : nodes;
 }
 
 function renderHighlightedText(
@@ -131,9 +208,14 @@ function renderHighlightedText(
   };
 }
 
-function renderTextSegment(text: string, highlight?: HighlightOptions, matchIndex = 0) {
+function renderTextSegment(
+  text: string,
+  highlight?: HighlightOptions,
+  matchIndex = 0,
+  onCopyNotify?: (message: string) => void
+) {
   if (!highlight?.term.trim()) {
-    return { node: renderInlineMarkdown(text), nextMatchIndex: matchIndex };
+    return { node: renderTextWithLinks(text, onCopyNotify), nextMatchIndex: matchIndex };
   }
 
   const plain = stripInlineMarkdown(text);
@@ -201,7 +283,7 @@ export function renderMessageContent(text: string, options?: RenderMessageConten
       return;
     }
 
-    const rendered = renderTextSegment(segment.content, highlight, matchIndex);
+    const rendered = renderTextSegment(segment.content, highlight, matchIndex, options?.onCopyNotify);
     parts.push(<span key={`text-${index}`}>{rendered.node}</span>);
     matchIndex = rendered.nextMatchIndex;
   });

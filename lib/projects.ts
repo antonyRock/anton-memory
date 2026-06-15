@@ -1,5 +1,6 @@
 import { getSupabase } from "@/lib/supabase";
 import { getCurrentUserId } from "@/lib/current-user";
+import { isImageDocument as isImageMimeDocument } from "@/lib/mime-types";
 
 export type Project = {
   id: string | number;
@@ -218,13 +219,14 @@ export async function assignConversationToProject(
   return data;
 }
 
-export function isImageDocument(document: Pick<ProjectDocument, "file_type" | "metadata">) {
-  const kind = document.metadata?.kind;
-  return (
-    document.file_type.startsWith("image/") ||
-    kind === "image" ||
-    kind === "generated_image"
-  );
+export function isImageDocument(
+  document: Pick<ProjectDocument, "file_type" | "file_name" | "metadata">
+) {
+  return isImageMimeDocument({
+    file_type: document.file_type,
+    file_name: document.file_name,
+    metadata: document.metadata
+  });
 }
 
 export async function searchProjects(pattern: string, limit = 10) {

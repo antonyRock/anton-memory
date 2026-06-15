@@ -109,6 +109,7 @@ async function buildFileNavItems(input: {
     const metadata = normalizeMetadata(row.metadata);
     const isImage = isImageDocument({
       file_type: attachment.fileType,
+      file_name: attachment.fileName,
       metadata
     });
     const isGeneratedImage = metadata.kind === "generated_image";
@@ -170,10 +171,9 @@ export async function listConversationDocuments(
   const { data: documentRows } = await supabase
     .from("documents")
     .select("id, file_name, file_type, file_size, storage_path, summary, extracted_text, metadata, created_at")
-    .eq("user_id", userId)
     .in(
       "id",
-      documentIds.map((id) => Number(id))
+      documentIds.map((id) => Number(id)).filter((id) => Number.isFinite(id))
     )
     .order("created_at", { ascending: false });
 
@@ -260,10 +260,9 @@ export async function listProjectDocuments(projectId: string | number, options: 
   const { data: linkedDocuments } = await supabase
     .from("documents")
     .select("id, file_name, file_type, file_size, storage_path, summary, extracted_text, metadata, created_at")
-    .eq("user_id", userId)
     .in(
       "id",
-      documentIds.map((id) => Number(id))
+      documentIds.map((id) => Number(id)).filter((id) => Number.isFinite(id))
     )
     .order("created_at", { ascending: false });
 

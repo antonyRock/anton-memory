@@ -1,39 +1,32 @@
 import { getDocumentDownloadPayload } from "@/lib/documents";
+import { toAsciiDownloadFileName } from "@/lib/download-filename";
+import { resolveDocumentMimeType } from "@/lib/mime-types";
 import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
 export const runtime = "nodejs";
 
 function contentDisposition(fileName: string, inline: boolean) {
+  const asciiName = toAsciiDownloadFileName(fileName);
   const encoded = encodeURIComponent(fileName);
   const mode = inline ? "inline" : "attachment";
-  return `${mode}; filename="${fileName.replace(/"/g, "")}"; filename*=UTF-8''${encoded}`;
+  return `${mode}; filename="${asciiName.replace(/"/g, "")}"; filename*=UTF-8''${encoded}`;
 }
 
 function resolveDownloadContentType(fileName: string, fileType: string) {
-  const normalized = fileType.trim().toLowerCase();
-  if (normalized && normalized !== "application/octet-stream") return fileType;
-
-  const lower = fileName.toLowerCase();
-  if (lower.endsWith(".xlsx")) {
-    return "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-  }
-  if (lower.endsWith(".xls")) return "application/vnd.ms-excel";
-  if (lower.endsWith(".pdf")) return "application/pdf";
-  if (lower.endsWith(".docx")) {
-    return "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
-  }
-  if (lower.endsWith(".csv")) return "text/csv";
-  if (lower.endsWith(".txt") || lower.endsWith(".md")) return "text/plain";
-  return fileType || "application/octet-stream";
+  return resolveDocumentMimeType(fileType, fileName);
 }
 
 export async function GET(
   request: Request,
   context: { params: Promise<{ id: string }> }
 ) {
-  return handleAuthenticatedRoute(request, async (_user) => {
+  return handleAuthenticatedRoute(request, async (user) => {
     const { id } = await context.params;
-    const payload = await getDocumentDownloadPayload(id);
+    const url = new URL(request.url);
+    const inline = url.searchParams.get("inline") === "1";
+    const payload = await getDocumentDownloadPayload(id, user.id, {
+      allowPreviewFallback: inline
+    });
     if (!payload) {
       return new Response(JSON.stringify({ error: "Document not found" }), {
         status: 404,
@@ -41,8 +34,6 @@ export async function GET(
       });
     }
 
-    const url = new URL(request.url);
-    const inline = url.searchParams.get("inline") === "1";
     const contentType = resolveDownloadContentType(payload.fileName, payload.fileType);
     const body = new Uint8Array(payload.buffer);
 

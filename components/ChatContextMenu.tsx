@@ -1,6 +1,6 @@
 "use client";
 
-import { FolderPlus, FileText, Link2, Pencil } from "lucide-react";
+import { FolderPlus, FileText, Link2, Pencil, Trash2 } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 type ChatContextMenuProps = {
@@ -11,6 +11,7 @@ type ChatContextMenuProps = {
   onCreateProject: () => void;
   onCopyLink: () => void;
   onOpenFiles: () => void;
+  onDelete: () => void;
 };
 
 export function ChatContextMenu({
@@ -20,7 +21,8 @@ export function ChatContextMenu({
   onRename,
   onCreateProject,
   onCopyLink,
-  onOpenFiles
+  onOpenFiles,
+  onDelete
 }: ChatContextMenuProps) {
   const menuRef = useRef<HTMLDivElement | null>(null);
 
@@ -112,6 +114,18 @@ export function ChatContextMenu({
       >
         <FolderPlus size={15} />
         Создать проект
+      </button>
+      <button
+        className="danger"
+        onClick={() => {
+          onDelete();
+          onClose();
+        }}
+        role="menuitem"
+        type="button"
+      >
+        <Trash2 size={15} />
+        Удалить чат
       </button>
     </div>
   );

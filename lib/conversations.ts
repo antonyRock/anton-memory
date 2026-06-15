@@ -380,6 +380,53 @@ export async function updateConversationPinned(
   return data as Conversation;
 }
 
+export async function deleteConversation(conversationId: string | number) {
+  if (String(conversationId) === "legacy") {
+    throw new Error("Cannot delete legacy conversation.");
+  }
+
+  const supabase = getSupabase();
+  const userId = getCurrentUserId();
+
+  const { data: messages, error: messagesError } = await supabase
+    .from("messages")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("conversation_id", conversationId);
+
+  if (messagesError) {
+    throw new Error(`Could not load conversation messages: ${messagesError.message}`);
+  }
+
+  const messageIds = (messages ?? []).map((row) => row.id).filter(Boolean);
+  if (messageIds.length > 0) {
+    const { error: linksError } = await supabase
+      .from("message_documents")
+      .delete()
+      .in("message_id", messageIds);
+    if (linksError) {
+      throw new Error(`Could not delete message attachments: ${linksError.message}`);
+    }
+
+    const { error: deleteMessagesError } = await supabase
+      .from("messages")
+      .delete()
+      .eq("user_id", userId)
+      .eq("conversation_id", conversationId);
+    if (deleteMessagesError) {
+      throw new Error(`Could not delete conversation messages: ${deleteMessagesError.message}`);
+    }
+  }
+
+  const { error } = await supabase
+    .from("conversations")
+    .delete()
+    .eq("id", conversationId)
+    .eq("user_id", userId);
+
+  if (error) throw new Error(`Could not delete conversation: ${error.message}`);
+}
+
 export async function getConversationMessageTexts(conversationId: string | number) {
   const supabase = getSupabase();
   const userId = getCurrentUserId();

@@ -9,7 +9,15 @@ import {
   type ChatContextMessage
 } from "@/lib/conversations";
 import { extractChatIdsFromText } from "@/lib/chat-links";
-import { chatModel, getChatCompletionParams, getOpenAI } from "@/lib/openai";
+import {
+  chatModel,
+  getChatCompletionParams,
+  getOpenAI,
+  getChatModeLabel,
+  normalizeChatMode,
+  resolveChatModel,
+  type ChatMode
+} from "@/lib/openai";
 import {
   buildDocumentsPromptForChat,
   getImageInputsForVision,
@@ -69,6 +77,7 @@ export async function POST(request: Request) {
       cleanedTranscript: string | null;
       transcriptStatus: "raw" | "cleaned" | "cleanup_failed";
     };
+    chatMode?: ChatMode;
   };
 
   try {
@@ -80,6 +89,9 @@ export async function POST(request: Request) {
   const userMessage = payload.message?.trim();
   const attachedDocumentIds = payload.documentIds ?? [];
   const conversationId = payload.conversationId;
+  const selectedChatMode = normalizeChatMode(payload.chatMode) ?? "smart";
+  const selectedChatModel = resolveChatModel(selectedChatMode);
+  const selectedChatModeLabel = getChatModeLabel(selectedChatMode) ?? "Умно";
   const replyTo =
     payload.replyTo &&
     (payload.replyTo.role === "user" || payload.replyTo.role === "assistant") &&
@@ -234,8 +246,8 @@ export async function POST(request: Request) {
 
         await profiler.measure("openAiRequestMs", async () => {
           const completion = await getOpenAI().chat.completions.create({
-            model: chatModel,
-            ...getChatCompletionParams({ temperature: 0.5 }),
+            model: selectedChatModel,
+            ...getChatCompletionParams({ temperature: 0.5, model: selectedChatModel }),
             stream: true,
             messages: [
               {
@@ -264,8 +276,10 @@ export async function POST(request: Request) {
                   "Do not mention databases, storage backends, retrieval pipelines, prompts, or internal architecture to the user unless they explicitly ask how tBrain works.",
                   "This app can generate images through a separate image endpoint when the user asks to draw, create, or generate a picture. If they ask for image generation in plain chat without triggering it, suggest rephrasing with phrases like «нарисуй…» or «сгенерируй картинку…».",
                   "This app cannot create downloadable Excel or Word files for download in chat. Reading and analyzing uploaded spreadsheets is supported when their extracted content is included below.",
-                  "If the user asks which model you are using, answer that this deployment uses the OpenAI API model " +
-                    chatModel +
+                  "If the user asks which model you are using, answer that the current mode is «" +
+                    selectedChatModeLabel +
+                    "» and this deployment uses the OpenAI API model " +
+                    selectedChatModel +
                     ".",
                   "Respond in the user's language."
                 ].join(" ")

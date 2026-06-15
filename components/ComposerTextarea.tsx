@@ -17,8 +17,8 @@ const PLACEHOLDER = "Спросите что-нибудь...";
 
 function resizeTextarea(textarea: HTMLTextAreaElement) {
   textarea.style.height = "auto";
-  textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
-  textarea.style.overflowY = textarea.scrollHeight > 160 ? "auto" : "hidden";
+  textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
+  textarea.style.overflowY = textarea.scrollHeight > 220 ? "auto" : "hidden";
 }
 
 export const ComposerTextarea = forwardRef<ComposerTextareaHandle, ComposerTextareaProps>(

@@ -5,6 +5,7 @@ import { useAuth } from "@/components/AuthProvider";
 
 export function appendAccessToken(url: string, accessToken?: string | null) {
   if (!accessToken?.trim()) return url;
+  if (url.startsWith("blob:") || url.startsWith("data:")) return url;
 
   const parsed = new URL(url, "http://local");
   parsed.searchParams.set("access_token", accessToken.trim());

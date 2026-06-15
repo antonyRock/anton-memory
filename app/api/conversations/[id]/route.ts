@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { updateConversationPinned, updateConversationTitle } from "@/lib/conversations";
+import { deleteConversation, updateConversationPinned, updateConversationTitle } from "@/lib/conversations";
 import { assignConversationToProject } from "@/lib/projects";
 import { handleAuthenticatedRoute } from "@/lib/server-auth";
 
@@ -33,5 +33,13 @@ export async function PATCH(request: Request, context: RouteContext) {
     }
 
     return NextResponse.json({ error: "title, pinned, or projectId is required." }, { status: 400 });
+  });
+}
+
+export async function DELETE(_request: Request, context: RouteContext) {
+  return handleAuthenticatedRoute(_request, async (_user) => {
+    const { id } = await context.params;
+    await deleteConversation(id);
+    return NextResponse.json({ ok: true });
   });
 }

@@ -8,15 +8,19 @@ import type { FileNavItem } from "@/lib/file-nav-shared";
 type ChatFilesPanelProps = {
   conversationId: string | number;
   conversationTitle: string;
+  kind?: "files" | "images";
   onClose: () => void;
   onOpenFile: (file: FileNavItem) => void;
+  onDownloadFile?: (file: FileNavItem) => void;
 };
 
 export function ChatFilesPanel({
   conversationId,
   conversationTitle,
+  kind = "files",
   onClose,
-  onOpenFile
+  onOpenFile,
+  onDownloadFile
 }: ChatFilesPanelProps) {
   const { authFetch } = useAuthFetch();
   const [search, setSearch] = useState("");
@@ -27,7 +31,7 @@ export function ChatFilesPanel({
     const handle = window.setTimeout(async () => {
       setLoading(true);
       try {
-        const params = new URLSearchParams({ kind: "all", search });
+        const params = new URLSearchParams({ kind, search });
         const response = await authFetch(
           `/api/conversations/${conversationId}/files?${params.toString()}`
         );
@@ -42,21 +46,32 @@ export function ChatFilesPanel({
     }, 200);
 
     return () => window.clearTimeout(handle);
-  }, [authFetch, conversationId, search]);
+  }, [authFetch, conversationId, kind, search]);
 
   return (
     <div className="chat-files-overlay" role="presentation">
       <button aria-label="Закрыть" className="chat-files-backdrop" onClick={onClose} type="button" />
       <div className="chat-files-panel" role="dialog" aria-modal="true">
         <FileBrowserPanel
-          emptyText="В этом чате пока нет файлов"
+          emptyText={
+            kind === "images"
+              ? "В этом чате пока нет изображений"
+              : "В этом чате пока нет файлов"
+          }
           files={files}
+          layout={kind === "images" ? "grid" : "list"}
           loading={loading}
           onClose={onClose}
+          onDownloadFile={onDownloadFile}
           onOpenFile={onOpenFile}
           onSearchChange={setSearch}
+          authFetch={authFetch}
           search={search}
-          title={`Файлы чата: ${conversationTitle}`}
+          title={
+            kind === "images"
+              ? `Изображения чата: ${conversationTitle}`
+              : `Файлы чата: ${conversationTitle}`
+          }
         />
       </div>
     </div>
