@@ -3,6 +3,7 @@
 import { BarChart3, LogOut, Settings, UserRound } from "lucide-react";
 import { useEffect, useRef, useState, type PointerEvent } from "react";
 import { useAuth } from "@/components/AuthProvider";
+import { TelegramLinkDialog } from "@/components/TelegramLinkDialog";
 import { useAuthFetch } from "@/hooks/useAuthFetch";
 import { userStatsCacheKey } from "@/lib/auth-client-state";
 
@@ -111,6 +112,7 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
   const [isEditingName, setIsEditingName] = useState(false);
   const [draftName, setDraftName] = useState("");
   const [isSavingName, setIsSavingName] = useState(false);
+  const [telegramDialogOpen, setTelegramDialogOpen] = useState(false);
 
   function beginNameEdit() {
     setMenuOpen(false);
@@ -238,6 +240,11 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
     };
   }, [menuOpen]);
 
+  async function connectTelegram() {
+    setMenuOpen(false);
+    setTelegramDialogOpen(true);
+  }
+
   function notify(message: string) {
     onNotify?.(message);
     setMenuOpen(false);
@@ -329,6 +336,14 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
           </button>
           <button
             className="sidebar-user-menu-item"
+            onClick={() => void connectTelegram()}
+            role="menuitem"
+            type="button"
+          >
+            Подключить Telegram
+          </button>
+          <button
+            className="sidebar-user-menu-item"
             onClick={() => {
               onSettings();
               setMenuOpen(false);
@@ -364,6 +379,12 @@ export function SidebarUserProfile({ onSettings, onNotify }: SidebarUserProfileP
           </button>
         </div>
       ) : null}
+
+      <TelegramLinkDialog
+        onClose={() => setTelegramDialogOpen(false)}
+        onNotify={onNotify}
+        open={telegramDialogOpen}
+      />
     </div>
   );
 }

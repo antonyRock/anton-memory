@@ -15,7 +15,10 @@ as $$
     or coalesce(p_file_name, '') ~* '\.(png|jpe?g|webp|gif|bmp|svg)$';
 $$;
 
-create or replace function public.get_user_stats(p_user_id uuid)
+-- Return type changes (chats, words, days) -> (chats, files, images, words, days)
+drop function if exists public.get_user_stats(uuid);
+
+create function public.get_user_stats(p_user_id uuid)
 returns table (chats bigint, files bigint, images bigint, words bigint, days bigint)
 language plpgsql
 stable

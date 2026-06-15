@@ -294,6 +294,8 @@ export default function Home() {
   const endRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoScrollRef = useRef(false);
   const userPausedAutoScrollRef = useRef(false);
+  const prevIsLoadingRef = useRef(false);
+  const prevStreamingTextRef = useRef<string | null | undefined>(undefined);
   const stickToBottomConversationRef = useRef<string | null>(null);
   const stickToBottomTimerRef = useRef<number | null>(null);
   const resizingSidebarRef = useRef(false);
@@ -494,6 +496,18 @@ export default function Home() {
 
   useEffect(() => {
     if (!shouldAutoScrollRef.current || userPausedAutoScrollRef.current) return;
+
+    const justFinished = prevIsLoadingRef.current && !isLoading;
+    const streamJustFinished =
+      prevStreamingTextRef.current !== null &&
+      prevStreamingTextRef.current !== undefined &&
+      streamingAssistantText === null;
+
+    prevIsLoadingRef.current = isLoading;
+    prevStreamingTextRef.current = streamingAssistantText;
+
+    if (justFinished || streamJustFinished) return;
+
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, isLoading, streamingAssistantText]);
 
@@ -549,6 +563,7 @@ export default function Home() {
   useEffect(() => {
     if (!activeConversationId) return;
     if (stickToBottomConversationRef.current !== String(activeConversationId)) return;
+    if (userPausedAutoScrollRef.current) return;
     scrollMessagesToBottom(true);
   }, [messages, activeConversationId]);
 
@@ -1131,7 +1146,10 @@ export default function Home() {
     setIsLoadingHistory(false);
   }
 
-  async function loadMessages(conversationId: string | number) {
+  async function loadMessages(
+    conversationId: string | number,
+    options: { stickToBottom?: boolean } = {}
+  ) {
     cancelPendingMessageLoad();
     const requestSeq = loadMessagesSeqRef.current;
     const controller = new AbortController();
@@ -1173,8 +1191,11 @@ export default function Home() {
               }>
             )
           );
-          shouldAutoScrollRef.current = true;
-          beginStickToBottom(conversationId);
+          if (options.stickToBottom) {
+            shouldAutoScrollRef.current = true;
+            userPausedAutoScrollRef.current = false;
+            beginStickToBottom(conversationId);
+          }
           window.localStorage.setItem("activeConversationId", String(conversationId));
           setSidebarOpen(false);
           return;
@@ -1505,7 +1526,7 @@ export default function Home() {
     setActiveConversationId(conversationId);
     window.localStorage.setItem("activeConversationId", String(conversationId));
     syncChatQueryParam(conversationId);
-    void loadMessages(conversationId);
+    void loadMessages(conversationId, { stickToBottom: true });
     closeSidebarIfMobile();
   }
 
@@ -1589,7 +1610,7 @@ export default function Home() {
 
   function scrollMessagesToBottom(followLayout = false) {
     const node = messagesRef.current;
-    if (!node) return;
+    if (!node || userPausedAutoScrollRef.current) return;
 
     const apply = () => {
       node.scrollTop = node.scrollHeight;
@@ -1813,8 +1834,14 @@ export default function Home() {
       replyToRole: activeReply?.role ?? null
     });
 
-    userPausedAutoScrollRef.current = false;
-    shouldAutoScrollRef.current = isNearBottom();
+    const nearBottom = isNearBottom();
+    if (nearBottom) {
+      userPausedAutoScrollRef.current = false;
+      shouldAutoScrollRef.current = true;
+    } else {
+      userPausedAutoScrollRef.current = true;
+      shouldAutoScrollRef.current = false;
+    }
     const clientRecentMessages = messages
       .filter((message) => message.role === "user" || message.role === "assistant")
       .slice(-12)
@@ -1942,6 +1969,12 @@ export default function Home() {
       setIsLoading(false);
       setStreamingAssistantText(null);
       setActivityPhase(null);
+      shouldAutoScrollRef.current = false;
+      if (stickToBottomTimerRef.current) {
+        window.clearTimeout(stickToBottomTimerRef.current);
+        stickToBottomTimerRef.current = null;
+      }
+      stickToBottomConversationRef.current = null;
     }
   }
 
