@@ -22,6 +22,7 @@ type AuthContextValue = {
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+const SESSION_CHECK_TIMEOUT_MS = 8_000;
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [supabase, setSupabase] = useState<SupabaseClient | null>(null);
@@ -47,11 +48,27 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     let mounted = true;
 
-    void supabase.auth.getSession().then(({ data }) => {
+    const sessionCheckTimeout = window.setTimeout(() => {
       if (!mounted) return;
-      setSession(data.session);
+      setSession(null);
       setLoading(false);
-    });
+    }, SESSION_CHECK_TIMEOUT_MS);
+
+    void supabase.auth
+      .getSession()
+      .then(({ data }) => {
+        if (!mounted) return;
+        setSession(data.session);
+        setLoading(false);
+      })
+      .catch(() => {
+        if (!mounted) return;
+        setSession(null);
+        setLoading(false);
+      })
+      .finally(() => {
+        window.clearTimeout(sessionCheckTimeout);
+      });
 
     const {
       data: { subscription }
@@ -62,6 +79,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     return () => {
       mounted = false;
+      window.clearTimeout(sessionCheckTimeout);
       subscription.unsubscribe();
     };
   }, [supabase]);
