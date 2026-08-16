@@ -20,7 +20,11 @@ export function getSupabaseBrowserClient() {
     auth: {
       persistSession: true,
       autoRefreshToken: true,
-      detectSessionInUrl: true
+      detectSessionInUrl: true,
+      // Supabase's default Web Locks integration can wait forever when a
+      // browser leaves a stale lock behind for this origin. Keep auth
+      // operations serialized by the client without blocking app startup.
+      lock: async (_name, _acquireTimeout, fn) => await fn()
     }
   });
 
